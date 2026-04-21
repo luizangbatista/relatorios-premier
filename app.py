@@ -1,11 +1,12 @@
 # ============================================================
 # FECHAMENTOS PREMIER
 # ------------------------------------------------------------
-# App unificado com duas abas de cliente:
+# App unificado com três abas de cliente:
 #   1) Harnefer -> leitura de imagem via OCR + relatório em imagem
 #   2) Demetra  -> leitura de planilha + PDF + relatório em imagem
+#   3) Oscar    -> leitura de PDF + relatório em imagem
 #
-# PRINCIPAIS REGRAS IMPLEMENTADAS
+# REGRAS PRINCIPAIS
 # ------------------------------------------------------------
 # HARNEFER
 # - OCR na imagem
@@ -19,6 +20,11 @@
 # - rakeback da planilha fixo em 70%
 # - PDF: lê apenas IDs mapeados para Demetra
 # - rebate de -5% somente se o total base da linha for positivo
+#
+# OSCAR
+# - entra apenas com PDF
+# - lê apenas IDs mapeados para Oscar
+# - rebate de -10% somente se o total base da linha for positivo
 #
 # PONTOS DE PERSONALIZAÇÃO RÁPIDA
 # ------------------------------------------------------------
@@ -52,8 +58,6 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 
 # ============================================================
 # 1) CONFIGURAÇÕES GERAIS
-# ------------------------------------------------------------
-# Altere aqui os parâmetros fixos principais.
 # ============================================================
 RB_HARNEFER = 76.0
 RB_DEMETRA_PLANILHA = 70.0
@@ -62,16 +66,12 @@ ORIGEM_PLANILHA_DEMETRA = "TheShark_"
 ID_PLANILHA_DEMETRA = "11719117"
 CODIGO_PLANILHA_DEMETRA = "802606"
 
+REBATE_DEMETRA = -5.0
+REBATE_OSCAR = -10.0
+
 
 # ============================================================
 # 2) MAPEAMENTO DE IDS DO PDF
-# ------------------------------------------------------------
-# Cada ID define:
-# - cliente
-# - % de rakeback
-#
-# Na aba Demetra, o app lê apenas as linhas do PDF cujo cliente
-# seja "Demetra".
 # ============================================================
 MAPA_IDS_PDF = {
     "12968708": {"cliente": "Demetra", "rb": 70.0},
@@ -92,8 +92,6 @@ MAPA_IDS_PDF = {
 
 # ============================================================
 # 3) CORES
-# ------------------------------------------------------------
-# Altere aqui toda a paleta visual do app.
 # ============================================================
 NAVY = (7, 29, 69)
 GOLD = (199, 143, 43)
@@ -109,15 +107,7 @@ GRID = (70, 70, 70)
 
 # ============================================================
 # 4) FONTES E TAMANHOS
-# ------------------------------------------------------------
-# Personalize aqui os tamanhos de fonte.
-#
-# REGRA VISUAL PEDIDA:
-# - título grande
-# - período maior que o texto da tabela
-# - período menor que o título
 # ============================================================
-
 # Harnefer / resumo simples
 FONT_TITLE_SUMMARY = 45
 FONT_SUBTITLE_SUMMARY = 36
@@ -128,7 +118,7 @@ FONT_TOTAL_SUMMARY = 30
 FONT_STATUS_SUMMARY = 36
 FONT_STATUS_VALUE_SUMMARY = 36
 
-# Demetra / tabela
+# Tabelas Demetra / Oscar
 FONT_TITLE_TABLE = 45
 FONT_SUBTITLE_TABLE = 36
 FONT_HEADER_TABLE = 30
@@ -140,16 +130,14 @@ FONT_STATUS_VALUE_TABLE = 36
 
 # ============================================================
 # 5) DIMENSÕES DAS IMAGENS
-# ------------------------------------------------------------
-# Ajuste aqui o tamanho dos relatórios gerados.
 # ============================================================
 SUMMARY_W = 1400
 SUMMARY_H = 980
 
-DEMETRA_W = 1450
-DEMETRA_ROW_H = 52
-DEMETRA_TABLE_TOP = 220
-DEMETRA_HEADER_H = 52
+TABLE_W = 1450
+TABLE_ROW_H = 52
+TABLE_TOP = 220
+TABLE_HEADER_H = 52
 
 
 # ============================================================
@@ -198,14 +186,12 @@ def parse_money(value) -> float:
 
 
 def to_png_bytes(img: Image.Image) -> bytes:
-    """Transforma a imagem PIL em bytes PNG para download."""
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
 
 def get_font(size: int, bold: bool = False):
-    """Carrega a fonte padrão do sistema."""
     candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
@@ -217,13 +203,11 @@ def get_font(size: int, bold: bool = False):
 
 
 def measure(draw, text, font):
-    """Mede largura e altura do texto."""
     box = draw.textbbox((0, 0), text, font=font)
     return box[2] - box[0], box[3] - box[1]
 
 
 def normalize_id(v) -> str:
-    """Normaliza IDs vindos de planilha/PDF."""
     s = str(v).strip()
     if s.endswith(".0"):
         s = s[:-2]
@@ -234,7 +218,6 @@ def normalize_id(v) -> str:
 # OCR / IMAGENS
 # ============================================================
 def preprocess_for_ocr(img: Image.Image) -> Image.Image:
-    """Melhora a imagem para OCR."""
     g = img.convert("L")
     g = ImageOps.autocontrast(g)
     g = ImageEnhance.Contrast(g).enhance(2.7)
@@ -243,7 +226,6 @@ def preprocess_for_ocr(img: Image.Image) -> Image.Image:
 
 
 def ocr_image(img: Image.Image, psm: int = 6) -> str:
-    """Executa OCR via Tesseract."""
     if not TESSERACT_OK:
         return ""
     proc = preprocess_for_ocr(img)
@@ -257,19 +239,16 @@ def ocr_image(img: Image.Image, psm: int = 6) -> str:
 # HARNEFER - LEITURA DA IMAGEM
 # ============================================================
 def detect_harnefer_image(img: Image.Image) -> bool:
-    """Verifica se a imagem tem estrutura do Harnefer."""
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("TOTAL FEE" in text and "WINNINGS" in text) or ("GAMES" in text and "ADMIN FEE" in text)
 
 
 def crop_harnefer_summary(img: Image.Image) -> Image.Image:
-    """Recorta a faixa onde ficam os 4 cards do resumo."""
     w, h = img.size
     return img.crop((int(w * 0.08), int(h * 0.32), int(w * 0.93), int(h * 0.64)))
 
 
 def first_money(text: str) -> float:
-    """Pega o primeiro valor monetário encontrado no texto."""
     for pat in [
         r"([0-9]{1,3}(?:[,\.][0-9]{3})*[,\.][0-9]{2})",
         r"([0-9]+[,\.][0-9]{2})",
@@ -281,12 +260,6 @@ def first_money(text: str) -> float:
 
 
 def extract_harnefer_values(img: Image.Image) -> dict:
-    """
-    Lê especificamente os 4 cards.
-    Usa:
-    - coluna 2 -> valor acima de Total Fee = rake
-    - coluna 4 -> valor acima de Winnings = ganhos
-    """
     crop = crop_harnefer_summary(img)
     w, h = crop.size
     col_w = w // 4
@@ -314,14 +287,6 @@ def extract_harnefer_values(img: Image.Image) -> dict:
 # DEMETRA - LEITURA DA PLANILHA
 # ============================================================
 def process_demetra_excel(uploaded_file):
-    """
-    Lê a planilha e retorna APENAS:
-    - origem = TheShark_
-    - id_conta = 11719117
-    - codigo = 802606
-
-    Todo o resto é ignorado.
-    """
     df = pd.read_excel(uploaded_file, usecols=[5, 6, 7, 8, 9, 29])
     df.columns = ["origem", "id_conta", "nick", "codigo", "ganhos", "rake"]
 
@@ -340,10 +305,9 @@ def process_demetra_excel(uploaded_file):
 
 
 # ============================================================
-# DEMETRA - LEITURA DO PDF
+# PDF - EXTRAÇÃO DE LINHAS
 # ============================================================
 def extract_pdf_lines(uploaded_file):
-    """Extrai as linhas do PDF em texto."""
     lines = []
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
@@ -352,10 +316,8 @@ def extract_pdf_lines(uploaded_file):
     return lines
 
 
-def process_demetra_pdf(uploaded_file):
-    """
-    Lê o PDF e retorna apenas as linhas cujo ID pertença ao Demetra.
-    """
+def process_pdf_by_client(uploaded_file, cliente_alvo: str):
+    """Lê o PDF e retorna apenas as linhas cujo ID pertença ao cliente alvo."""
     rows = []
 
     for line in extract_pdf_lines(uploaded_file):
@@ -372,7 +334,7 @@ def process_demetra_pdf(uploaded_file):
             continue
 
         info = MAPA_IDS_PDF.get(id_agente)
-        if not info or info["cliente"] != "Demetra":
+        if not info or info["cliente"] != cliente_alvo:
             continue
 
         ganhos = parse_money(money_matches[0])
@@ -392,17 +354,10 @@ def process_demetra_pdf(uploaded_file):
 # ============================================================
 # CÁLCULOS FINANCEIROS
 # ============================================================
-def calc_row(ganhos: float, rake: float, rb_percentual: float):
-    """
-    Calcula:
-    - rakeback
-    - total_base
-    - rebate (-5% se positivo)
-    - total_final
-    """
+def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual: float):
     rb_valor = rake * (rb_percentual / 100.0)
     total_base = ganhos + rb_valor
-    rebate = total_base * (-0.05) if total_base > 0 else 0.0
+    rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
     total_final = total_base + rebate
     return total_base, rebate, total_final
 
@@ -422,12 +377,10 @@ def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.
 
 
 def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: float, total_final: float) -> Image.Image:
-    """Gera a imagem final do Harnefer."""
     W, H = SUMMARY_W, SUMMARY_H
     img = Image.new("RGB", (W, H), GRAY)
     draw = ImageDraw.Draw(img)
 
-    # Fontes
     title_font = get_font(FONT_TITLE_SUMMARY, bold=True)
     subtitle_font = get_font(FONT_SUBTITLE_SUMMARY, bold=False)
     subtitle_bold = get_font(FONT_SUBTITLE_SUMMARY, bold=True)
@@ -438,13 +391,11 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     status_font = get_font(FONT_STATUS_SUMMARY, bold=True)
     status_value_font = get_font(FONT_STATUS_VALUE_SUMMARY, bold=True)
 
-    # Título
     tw, _ = measure(draw, titulo, title_font)
     draw.text(((W - tw) / 2, 40), titulo, fill=NAVY, font=title_font)
     draw.line((70, 115, 300, 115), fill=GOLD, width=3)
     draw.line((1100, 115, 1330, 115), fill=GOLD, width=3)
 
-    # Subtítulo
     label = "Período do fechamento:"
     l_w, _ = measure(draw, label, subtitle_font)
     p_w, _ = measure(draw, periodo, subtitle_bold)
@@ -452,7 +403,6 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((x0, 150), label, fill=NAVY, font=subtitle_font)
     draw.text((x0 + l_w + 12, 150), periodo, fill=NAVY, font=subtitle_bold)
 
-    # Tabela principal
     table_x1, table_x2 = 60, 1340
     header_y1, header_y2 = 250, 325
     values_y1, values_y2 = 325, 455
@@ -476,7 +426,6 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
         vw, _ = measure(draw, sval, value_font)
         draw.text((cx - vw / 2, values_y1 + 45), sval, fill=NAVY, font=value_font)
 
-    # Rebate
     draw.rectangle((60, 490, 1340, 550), fill=LIGHT_GRAY)
     rebate_label = "-5% total" if rebate != 0 else "Sem rebate"
     rebate_value = fmt_brl(rebate) if rebate != 0 else "0,00"
@@ -485,7 +434,6 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((1000 - rl_w, 506), rebate_label, fill=NAVY, font=small_font)
     draw.text((1310 - rv_w, 506), rebate_value, fill=NAVY, font=small_font)
 
-    # Total
     draw.rectangle((60, 550, 1340, 635), fill=YELLOW)
     tlabel, tvalue = "TOTAL", fmt_brl(total_final)
     tl_w, _ = measure(draw, tlabel, total_font)
@@ -493,7 +441,6 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((1040 - tl_w, 575), tlabel, fill=(0, 0, 0), font=total_font)
     draw.text((1310 - tv_w, 575), tvalue, fill=(0, 0, 0), font=total_font)
 
-    # Status
     status_text = "PREMIER TEM A PAGAR" if total_final > 0 else ("PREMIER TEM A RECEBER" if total_final < 0 else "SEM VALORES")
     status_value = f"R$ {fmt_brl(abs(total_final))}"
     draw.rounded_rectangle((60, 710, 1340, 835), radius=16, outline=NAVY, width=3, fill=LIGHT_BG)
@@ -508,29 +455,19 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
 
 
 # ============================================================
-# GERADOR DE IMAGEM - DEMETRA
+# GERADOR DE IMAGEM - TABELA (DEMETRA / OSCAR)
 # ============================================================
-def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float) -> Image.Image:
-    """
-    Gera a imagem final do Demetra com:
-    - cabeçalho
-    - linhas dos agentes
-    - linha total
-    - linha rebate
-    - linha total final
-    - resumo pagar/receber
-    """
+def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str) -> Image.Image:
     n_rows = len(df)
-    row_h = DEMETRA_ROW_H
-    table_top = DEMETRA_TABLE_TOP
-    header_h = DEMETRA_HEADER_H
-    W = DEMETRA_W
+    row_h = TABLE_ROW_H
+    table_top = TABLE_TOP
+    header_h = TABLE_HEADER_H
+    W = TABLE_W
     H = table_top + header_h + (n_rows + 3) * row_h + 180
 
     img = Image.new("RGB", (W, H), GRAY)
     draw = ImageDraw.Draw(img)
 
-    # Fontes
     title_font = get_font(FONT_TITLE_TABLE, bold=True)
     subtitle_font = get_font(FONT_SUBTITLE_TABLE, bold=False)
     subtitle_bold = get_font(FONT_SUBTITLE_TABLE, bold=True)
@@ -540,14 +477,11 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
     status_font = get_font(FONT_STATUS_TABLE, bold=True)
     status_value_font = get_font(FONT_STATUS_VALUE_TABLE, bold=True)
 
-    # Título
-    title = "DEMETRA"
-    tw, _ = measure(draw, title, title_font)
-    draw.text(((W - tw) / 2, 20), title, fill=NAVY, font=title_font)
+    tw, _ = measure(draw, titulo, title_font)
+    draw.text(((W - tw) / 2, 20), titulo, fill=NAVY, font=title_font)
     draw.line((60, 70, 250, 70), fill=GOLD, width=3)
     draw.line((1190, 70, 1380, 70), fill=GOLD, width=3)
 
-    # Subtítulo
     label = "Período do fechamento:"
     l_w, _ = measure(draw, label, subtitle_font)
     p_w, _ = measure(draw, periodo, subtitle_bold)
@@ -555,7 +489,6 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
     draw.text((x0, 100), label, fill=NAVY, font=subtitle_font)
     draw.text((x0 + l_w + 12, 100), periodo, fill=NAVY, font=subtitle_bold)
 
-    # Tabela
     x1 = 50
     widths = [500, 210, 210, 130, 260]
     headers = ["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]
@@ -583,7 +516,6 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
                 draw.text((cx - vw / 2, y + 12), val, fill=(0, 0, 0), font=cell_font)
         y += row_h
 
-    # Linha total
     draw.rectangle((x1, y, x1 + table_w, y + row_h), fill=WHITE, outline=GRID, width=2)
     draw.rectangle((x1, y, xs[4], y + row_h), fill=NAVY)
     total_label = "TOTAL"
@@ -594,9 +526,8 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
     draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += row_h
 
-    # Linha rebate
     draw.rectangle((x1, y, x1 + table_w, y + row_h), fill=LIGHT_GRAY, outline=GRID, width=2)
-    rlabel = "-5% total" if rebate_total != 0 else "Sem rebate"
+    rlabel = rebate_label if rebate_total != 0 else "Sem rebate"
     rvalue = fmt_brl(rebate_total) if rebate_total != 0 else "0,00"
     rlw, _ = measure(draw, rlabel, cell_font)
     rvw, _ = measure(draw, rvalue, cell_font)
@@ -604,7 +535,6 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
     draw.text((((xs[4] + xs[5]) / 2) - rvw / 2, y + 12), rvalue, fill=(0, 0, 0), font=cell_font)
     y += row_h
 
-    # Linha total final
     draw.rectangle((x1, y, x1 + table_w, y + row_h), fill=YELLOW, outline=GRID, width=2)
     flw, _ = measure(draw, total_label, total_font)
     fvw, _ = measure(draw, total_str, total_font)
@@ -612,7 +542,6 @@ def generate_demetra_table_image(periodo: str, df: pd.DataFrame, total_geral: fl
     draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += row_h
 
-    # Status
     status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
     status_value = f"R$ {fmt_brl(abs(total_geral))}"
     box_y1 = y + 35
@@ -670,13 +599,12 @@ def page_demetra():
 
     rows = []
 
-    # Planilha
     if planilha is not None:
         demetra_df = process_demetra_excel(planilha)
         if not demetra_df.empty:
             ganhos_excel = demetra_df["ganhos"].sum()
             rake_excel = demetra_df["rake"].sum()
-            total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA)
+            total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA, REBATE_DEMETRA)
             rows.append({
                 "AGENTE": AGENTE_PLANILHA_DEMETRA,
                 "GANHOS": ganhos_excel,
@@ -689,11 +617,10 @@ def page_demetra():
         else:
             st.info("Nenhuma linha encontrada para TheShark_ com ID 11719117 na planilha.")
 
-    # PDF
     if pdf is not None:
-        df_pdf = process_demetra_pdf(pdf)
+        df_pdf = process_pdf_by_client(pdf, "Demetra")
         for _, row in df_pdf.iterrows():
-            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
+            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
             rows.append({
                 "AGENTE": row["agente"],
                 "GANHOS": float(row["ganhos"]),
@@ -713,11 +640,13 @@ def page_demetra():
         rebate_total = detalhado["_REBATE"].sum()
         total_geral = detalhado["_TOTAL_FINAL"].sum()
 
-        report = generate_demetra_table_image(
-            periodo.strip() or "-",
-            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
-            total_geral,
-            rebate_total,
+        report = generate_client_table_image(
+            titulo="DEMETRA",
+            periodo=periodo.strip() or "-",
+            df=detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_geral=total_geral,
+            rebate_total=rebate_total,
+            rebate_label="-5% total",
         )
 
         st.image(report, caption="Pronto para print", use_container_width=True)
@@ -729,13 +658,63 @@ def page_demetra():
         )
 
 
+def page_oscar():
+    st.subheader("Oscar")
+    periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
+    pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="oscar_pdf")
+
+    rows = []
+
+    if pdf is not None:
+        df_pdf = process_pdf_by_client(pdf, "Oscar")
+        for _, row in df_pdf.iterrows():
+            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+
+    if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
+        if not rows:
+            st.warning("Envie o PDF.")
+            return
+
+        detalhado = pd.DataFrame(rows)
+        rebate_total = detalhado["_REBATE"].sum()
+        total_geral = detalhado["_TOTAL_FINAL"].sum()
+
+        report = generate_client_table_image(
+            titulo="OSCAR",
+            periodo=periodo.strip() or "-",
+            df=detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_geral=total_geral,
+            rebate_total=rebate_total,
+            rebate_label="-10% total",
+        )
+
+        st.image(report, caption="Pronto para print", use_container_width=True)
+        st.download_button(
+            "Baixar relatório em PNG",
+            data=to_png_bytes(report),
+            file_name="oscar_fechamento.png",
+            mime="image/png",
+        )
+
+
 # ============================================================
 # APP PRINCIPAL
 # ============================================================
 st.title("Fechamentos Premier")
-cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra"])
+cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra", "Oscar"])
 
 if cliente == "Harnefer":
     page_harnefer()
-else:
+elif cliente == "Demetra":
     page_demetra()
+else:
+    page_oscar()
