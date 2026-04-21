@@ -1,4 +1,23 @@
-# FECHAMENTOS PREMIER - APP FINAL
+# FECHAMENTOS PREMIER - APP FINAL COM ALEX
+# ------------------------------------------------------------
+# Clientes:
+# - Harnefer: OCR em imagem
+# - Demetra: planilha + PDF
+# - Oscar: PDF
+# - Alex: PDF
+#
+# Regras:
+# - Harnefer: RB 76%, sem rebate
+# - Demetra: planilha (TheShark_/11719117) RB 70%; PDF conforme mapa; rebate -5% se positivo
+# - Oscar: PDF conforme mapa; rebate -10% se positivo
+# - Alex: PDF conforme mapa; rebate -5% se positivo
+#
+# Layout:
+# - relatórios em imagem
+# - quebra automática de linha na coluna AGENTE
+# - fonte do AGENTE menor para evitar estouro
+# ------------------------------------------------------------
+
 import io
 import re
 from pathlib import Path
@@ -17,10 +36,14 @@ except Exception:
 
 st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 
+# =========================
+# CONFIGURAÇÕES GERAIS
+# =========================
 RB_HARNEFER = 76.0
 RB_DEMETRA_PLANILHA = 70.0
 REBATE_DEMETRA = -5.0
 REBATE_OSCAR = -10.0
+REBATE_ALEX = -5.0
 
 AGENTE_PLANILHA_DEMETRA = "TheShark_ (ID11719117)"
 ORIGEM_PLANILHA_DEMETRA = "TheShark_"
@@ -43,6 +66,9 @@ MAPA_IDS_PDF = {
     "13472941": {"cliente": "Oscar", "rb": 65.0},
 }
 
+# =========================
+# CORES
+# =========================
 NAVY = (7, 29, 69)
 GOLD = (199, 143, 43)
 GREEN = (0, 120, 0)
@@ -54,6 +80,9 @@ YELLOW = (248, 238, 27)
 LIGHT_GRAY = (230, 230, 230)
 GRID = (90, 90, 90)
 
+# =========================
+# FONTES / TAMANHOS
+# =========================
 FONT_TITLE = 45
 FONT_SUBTITLE = 36
 FONT_HEADER = 30
@@ -70,6 +99,10 @@ TABLE_ROW_H_MIN = 52
 TABLE_TOP = 220
 TABLE_HEADER_H = 52
 
+
+# =========================
+# UTILITÁRIOS
+# =========================
 def fmt_brl(v: float) -> str:
     s = f"{float(v):,.2f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
@@ -79,12 +112,15 @@ def parse_money(value) -> float:
         return 0.0
     if isinstance(value, (int, float)):
         return float(value)
+
     text = str(value).strip()
     if not text:
         return 0.0
+
     text = text.replace("R$", "").replace(" ", "")
     text = text.replace("—", "-").replace("–", "-").replace("−", "-")
     text = text.replace("(", "").replace(")", "")
+
     if "," in text and "." in text:
         if text.rfind(",") > text.rfind("."):
             text = text.replace(".", "").replace(",", ".")
@@ -92,12 +128,15 @@ def parse_money(value) -> float:
             text = text.replace(",", "")
     elif "," in text:
         text = text.replace(".", "").replace(",", ".")
+
     if text.count(".") > 1:
         parts = text.split(".")
         text = "".join(parts[:-1]) + "." + parts[-1]
+
     text = re.sub(r"[^0-9.\-]", "", text)
     if text in {"", "-", ".", "-."}:
         return 0.0
+
     try:
         return float(text)
     except Exception:
@@ -145,6 +184,10 @@ def wrap_text(draw, text, font, max_width):
         lines.append(current)
     return lines if lines else [""]
 
+
+# =========================
+# OCR / HARNEFER
+# =========================
 def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     g = img.convert("L")
     g = ImageOps.autocontrast(g)
@@ -186,8 +229,20 @@ def extract_harnefer_values(img: Image.Image) -> dict:
     ganhos = first_money(texts[3])
     rakeback = rake * (RB_HARNEFER / 100.0)
     total = ganhos + rakeback
-    return {"ganhos": ganhos, "rake": rake, "rakeback": rakeback, "total_final": total, "ocr_fee": texts[1], "ocr_winnings": texts[3], "crop": crop}
+    return {
+        "ganhos": ganhos,
+        "rake": rake,
+        "rakeback": rakeback,
+        "total_final": total,
+        "ocr_fee": texts[1],
+        "ocr_winnings": texts[3],
+        "crop": crop,
+    }
 
+
+# =========================
+# PLANILHA DEMETRA
+# =========================
 def process_demetra_excel(uploaded_file):
     df = pd.read_excel(uploaded_file, usecols=[5, 6, 7, 8, 9, 29])
     df.columns = ["origem", "id_conta", "nick", "codigo", "ganhos", "rake"]
@@ -202,6 +257,10 @@ def process_demetra_excel(uploaded_file):
     mask = (df["id_conta"] == ID_PLANILHA_DEMETRA) & (df["origem"] == ORIGEM_PLANILHA_DEMETRA)
     return df[mask].copy()
 
+
+# =========================
+# PDF
+# =========================
 def extract_pdf_lines(uploaded_file):
     lines = []
     with pdfplumber.open(uploaded_file) as pdf:
@@ -228,9 +287,18 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
         ganhos = parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
         agente = re.sub(r"\s{2,}", " ", line.split(id_agente)[0].strip())
-        rows.append({"agente": agente, "ganhos": ganhos, "rake": rake, "rb_percentual": float(info["rb"])})
+        rows.append({
+            "agente": agente,
+            "ganhos": ganhos,
+            "rake": rake,
+            "rb_percentual": float(info["rb"])
+        })
     return pd.DataFrame(rows)
 
+
+# =========================
+# CÁLCULOS
+# =========================
 def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual: float):
     rb_valor = rake * (rb_percentual / 100.0)
     total_base = ganhos + rb_valor
@@ -238,10 +306,15 @@ def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual
     total_final = total_base + rebate
     return total_base, rebate, total_final
 
+
+# =========================
+# RELATÓRIO SIMPLES / HARNEFER
+# =========================
 def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: float, total_final: float) -> Image.Image:
     W, H = SUMMARY_W, SUMMARY_H
     img = Image.new("RGB", (W, H), GRAY)
     draw = ImageDraw.Draw(img)
+
     title_font = get_font(FONT_TITLE, bold=True)
     subtitle_font = get_font(FONT_SUBTITLE, bold=False)
     subtitle_bold = get_font(FONT_SUBTITLE, bold=True)
@@ -313,8 +386,19 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     return img
 
 def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
-    return generate_summary_report("HARNEFER", periodo, ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"], [ganhos, rake, rake * (RB_HARNEFER / 100.0), ganhos + rake * (RB_HARNEFER / 100.0)], 0.0, ganhos + rake * (RB_HARNEFER / 100.0))
+    return generate_summary_report(
+        "HARNEFER",
+        periodo,
+        ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"],
+        [ganhos, rake, rake * (RB_HARNEFER / 100.0), ganhos + rake * (RB_HARNEFER / 100.0)],
+        0.0,
+        ganhos + rake * (RB_HARNEFER / 100.0),
+    )
 
+
+# =========================
+# RELATÓRIO TABELA COM WRAP
+# =========================
 def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str) -> Image.Image:
     temp_img = Image.new("RGB", (10, 10), WHITE)
     temp_draw = ImageDraw.Draw(temp_img)
@@ -322,6 +406,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     agent_font = get_font(FONT_AGENT, bold=False)
     line_h = measure(temp_draw, "Ag", agent_font)[1] + 4
     agente_col_width = 500 - 24
+
     row_heights = []
     for _, row in df.iterrows():
         lines = wrap_text(temp_draw, str(row["AGENTE"]), agent_font, agente_col_width)
@@ -372,17 +457,21 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     for idx, row in df.iterrows():
         row_h = row_heights[idx]
         draw.rectangle((x1, y, x1 + table_w, y + row_h), fill=WHITE, outline=GRID, width=2)
+
         wrapped = wrap_text(draw, str(row["AGENTE"]), agent_font, agente_col_width)
         for j, line in enumerate(wrapped):
             draw.text((xs[0] + 12, y + 8 + j * line_h), line, fill=(0, 0, 0), font=agent_font)
+
         vals = [fmt_brl(row["GANHOS"]), fmt_brl(row["RAKE"]), str(row["RB"]), fmt_brl(row["TOTAL"])]
         for i, val in enumerate(vals, start=1):
             vw, vh = measure(draw, val, cell_font)
             cx = (xs[i] + xs[i + 1]) / 2
             cy = y + (row_h - vh) / 2 - 2
             draw.text((cx - vw / 2, cy), val, fill=(0, 0, 0), font=cell_font)
+
         y += row_h
 
+    # total
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=WHITE, outline=GRID, width=2)
     draw.rectangle((x1, y, xs[4], y + TABLE_ROW_H_MIN), fill=NAVY)
     total_label = "TOTAL"
@@ -393,6 +482,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
+    # rebate
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=LIGHT_GRAY, outline=GRID, width=2)
     rlabel = rebate_label if rebate_total != 0 else "Sem rebate"
     rvalue = fmt_brl(rebate_total) if rebate_total != 0 else "0,00"
@@ -402,6 +492,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - rvw / 2, y + 12), rvalue, fill=(0, 0, 0), font=cell_font)
     y += TABLE_ROW_H_MIN
 
+    # total final
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=YELLOW, outline=GRID, width=2)
     flw, _ = measure(draw, total_label, total_font)
     fvw, _ = measure(draw, total_str, total_font)
@@ -409,6 +500,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
+    # status
     status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
     status_value = f"R$ {fmt_brl(abs(total_geral))}"
     box_y1 = y + 35
@@ -419,25 +511,35 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     start_x = (W - (stw + 20 + svw)) / 2
     draw.text((start_x, box_y1 + 28), status_text, fill=NAVY, font=status_font)
     draw.text((start_x + stw + 20, box_y1 + 24), status_value, fill=GREEN if total_geral >= 0 else RED, font=status_value_font)
+
     return img
 
+
+# =========================
+# PÁGINAS
+# =========================
 def page_harnefer():
     st.subheader("Harnefer")
     periodo = st.text_input("Período do fechamento", key="periodo_harnefer", placeholder="13/04/2026 a 19/04/2026")
     arquivo = st.file_uploader("Envie a imagem do Harnefer", type=["png", "jpg", "jpeg", "webp"], key="harnefer_img")
+
     if not TESSERACT_OK:
         st.error("OCR indisponível: instale `pytesseract` e `tesseract-ocr`.")
         return
+
     if arquivo and st.button("Ler imagem e gerar fechamento", type="primary", key="btn_harnefer"):
         img = Image.open(arquivo)
         if not detect_harnefer_image(img):
             st.warning("Não identifiquei a imagem do Harnefer com segurança.")
             return
+
         dados = extract_harnefer_values(img)
+
         with st.expander("Diagnóstico OCR", expanded=False):
             st.image(dados["crop"], caption="Recorte usado para leitura", width=700)
             st.code(dados["ocr_fee"])
             st.code(dados["ocr_winnings"])
+
         report = generate_harnefer_report(periodo.strip() or "-", dados["ganhos"], dados["rake"])
         st.image(report, caption="Relatório final", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="harnefer_fechamento.png", mime="image/png")
@@ -447,21 +549,41 @@ def page_demetra():
     periodo = st.text_input("Período do fechamento", key="periodo_demetra", placeholder="06/04/2026 a 12/04/2026")
     planilha = st.file_uploader("Envie a planilha 2101...", type=["xlsx", "xls"], key="demetra_xlsx")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
+
     rows = []
+
     if planilha is not None:
         demetra_df = process_demetra_excel(planilha)
         if not demetra_df.empty:
             ganhos_excel = demetra_df["ganhos"].sum()
             rake_excel = demetra_df["rake"].sum()
             total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA, REBATE_DEMETRA)
-            rows.append({"AGENTE": AGENTE_PLANILHA_DEMETRA, "GANHOS": ganhos_excel, "RAKE": rake_excel, "RB": f"{int(RB_DEMETRA_PLANILHA)}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": AGENTE_PLANILHA_DEMETRA,
+                "GANHOS": ganhos_excel,
+                "RAKE": rake_excel,
+                "RB": f"{int(RB_DEMETRA_PLANILHA)}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
         else:
             st.info("Nenhuma linha encontrada para TheShark_ com ID 11719117 na planilha.")
+
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Demetra")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
             st.warning("Envie a planilha e/ou o PDF.")
@@ -477,12 +599,22 @@ def page_oscar():
     st.subheader("Oscar")
     periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="oscar_pdf")
+
     rows = []
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Oscar")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+
     if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
         if not rows:
             st.warning("Envie o PDF.")
@@ -494,11 +626,49 @@ def page_oscar():
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
 
+def page_alex():
+    st.subheader("Alex")
+    periodo = st.text_input("Período do fechamento", key="periodo_alex", placeholder="06/04/2026 a 12/04/2026")
+    pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="alex_pdf")
+
+    rows = []
+    if pdf is not None:
+        df_pdf = process_pdf_by_client(pdf, "Alex")
+        for _, row in df_pdf.iterrows():
+            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_ALEX)
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+
+    if st.button("Gerar fechamento Alex", type="primary", key="btn_alex"):
+        if not rows:
+            st.warning("Envie o PDF.")
+            return
+        detalhado = pd.DataFrame(rows)
+        rebate_total = detalhado["_REBATE"].sum()
+        total_geral = detalhado["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image("ALEX", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-5% total")
+        st.image(report, caption="Pronto para print", use_container_width=True)
+        st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
+
+
+# =========================
+# APP PRINCIPAL
+# =========================
 st.title("Fechamentos Premier")
-cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra", "Oscar"])
+cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra", "Oscar", "Alex"])
+
 if cliente == "Harnefer":
     page_harnefer()
 elif cliente == "Demetra":
     page_demetra()
-else:
+elif cliente == "Oscar":
     page_oscar()
+else:
+    page_alex()
