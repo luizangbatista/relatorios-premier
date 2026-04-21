@@ -1,22 +1,32 @@
-# FECHAMENTOS PREMIER - APP FINAL COM ALEX
+# ============================================================
+# FECHAMENTOS PREMIER - APP FINAL COM ALEX (PDF + IMAGEM CASARICA)
 # ------------------------------------------------------------
 # Clientes:
 # - Harnefer: OCR em imagem
 # - Demetra: planilha + PDF
 # - Oscar: PDF
-# - Alex: PDF
+# - Alex: PDF + imagem Gustavo | Casarica
 #
 # Regras:
 # - Harnefer: RB 76%, sem rebate
 # - Demetra: planilha (TheShark_/11719117) RB 70%; PDF conforme mapa; rebate -5% se positivo
 # - Oscar: PDF conforme mapa; rebate -10% se positivo
-# - Alex: PDF conforme mapa; rebate -5% se positivo
+# - Alex:
+#     * PDF conforme mapa
+#     * imagem Casarica:
+#         ganhos = Profit/Loss
+#         rake exibido = Rake 70%
+#         rakeback real = rake_70 * (65/70)
+#         total_base = ganhos + rakeback
+#         rebate:
+#             positivo -> -5%
+#             negativo -> +5% (fica menos negativo)
 #
-# Layout:
+# Melhorias de layout:
 # - relatórios em imagem
 # - quebra automática de linha na coluna AGENTE
 # - fonte do AGENTE menor para evitar estouro
-# ------------------------------------------------------------
+# ============================================================
 
 import io
 import re
@@ -43,7 +53,10 @@ RB_HARNEFER = 76.0
 RB_DEMETRA_PLANILHA = 70.0
 REBATE_DEMETRA = -5.0
 REBATE_OSCAR = -10.0
-REBATE_ALEX = -5.0
+REBATE_ALEX_POSITIVO = -5.0
+REBATE_ALEX_NEGATIVO = 5.0
+RB_ALEX_IMAGEM_REAL = 65.0
+RB_ALEX_IMAGEM_EXIBIDO = 70.0
 
 AGENTE_PLANILHA_DEMETRA = "TheShark_ (ID11719117)"
 ORIGEM_PLANILHA_DEMETRA = "TheShark_"
@@ -186,7 +199,7 @@ def wrap_text(draw, text, font, max_width):
 
 
 # =========================
-# OCR / HARNEFER
+# OCR
 # =========================
 def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     g = img.convert("L")
@@ -204,6 +217,10 @@ def ocr_image(img: Image.Image, psm: int = 6) -> str:
     except Exception:
         return ""
 
+
+# =========================
+# HARNEFER
+# =========================
 def detect_harnefer_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("TOTAL FEE" in text and "WINNINGS" in text) or ("GAMES" in text and "ADMIN FEE" in text)
@@ -237,6 +254,46 @@ def extract_harnefer_values(img: Image.Image) -> dict:
         "ocr_fee": texts[1],
         "ocr_winnings": texts[3],
         "crop": crop,
+    }
+
+
+# =========================
+# ALEX - IMAGEM CASARICA
+# =========================
+def detect_alex_casarica_image(img: Image.Image) -> bool:
+    text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
+    return ("GUSTAVO" in text and "CASARICA" in text) or ("PROFIT" in text and "LOSS" in text and "RAKE 70" in text)
+
+def extract_labeled_money(text: str, label_pattern: str) -> float:
+    m = re.search(label_pattern + r"[^0-9\-]*([\-]?[0-9][0-9\.,]+)", text, flags=re.IGNORECASE)
+    if m:
+        return parse_money(m.group(1))
+    return 0.0
+
+def extract_alex_casarica_values(img: Image.Image) -> dict:
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    ganhos = extract_labeled_money(text, r"PROFIT\s*/\s*LOSS")
+    rake70 = extract_labeled_money(text, r"RAKE\s*70%?")
+    rakeback = rake70 * (RB_ALEX_IMAGEM_REAL / RB_ALEX_IMAGEM_EXIBIDO)
+    total_base = ganhos + rakeback
+
+    if total_base > 0:
+        rebate = total_base * (REBATE_ALEX_POSITIVO / 100.0)
+    elif total_base < 0:
+        rebate = total_base * (REBATE_ALEX_NEGATIVO / 100.0)
+    else:
+        rebate = 0.0
+
+    total_final = total_base + rebate
+    return {
+        "agente": "Gustavo | Casarica",
+        "ganhos": ganhos,
+        "rake": rake70,
+        "rb_percentual": RB_ALEX_IMAGEM_REAL,
+        "total_base": total_base,
+        "rebate": rebate,
+        "total_final": total_final,
+        "ocr_text": text,
     }
 
 
@@ -303,6 +360,18 @@ def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual
     rb_valor = rake * (rb_percentual / 100.0)
     total_base = ganhos + rb_valor
     rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
+    total_final = total_base + rebate
+    return total_base, rebate, total_final
+
+def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
+    rb_valor = rake * (rb_percentual / 100.0)
+    total_base = ganhos + rb_valor
+    if total_base > 0:
+        rebate = total_base * (REBATE_ALEX_POSITIVO / 100.0)
+    elif total_base < 0:
+        rebate = total_base * (REBATE_ALEX_NEGATIVO / 100.0)
+    else:
+        rebate = 0.0
     total_final = total_base + rebate
     return total_base, rebate, total_final
 
@@ -471,7 +540,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 
         y += row_h
 
-    # total
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=WHITE, outline=GRID, width=2)
     draw.rectangle((x1, y, xs[4], y + TABLE_ROW_H_MIN), fill=NAVY)
     total_label = "TOTAL"
@@ -482,7 +550,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
-    # rebate
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=LIGHT_GRAY, outline=GRID, width=2)
     rlabel = rebate_label if rebate_total != 0 else "Sem rebate"
     rvalue = fmt_brl(rebate_total) if rebate_total != 0 else "0,00"
@@ -492,7 +559,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - rvw / 2, y + 12), rvalue, fill=(0, 0, 0), font=cell_font)
     y += TABLE_ROW_H_MIN
 
-    # total final
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=YELLOW, outline=GRID, width=2)
     flw, _ = measure(draw, total_label, total_font)
     fvw, _ = measure(draw, total_str, total_font)
@@ -500,7 +566,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
-    # status
     status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
     status_value = f"R$ {fmt_brl(abs(total_geral))}"
     box_y1 = y + 35
@@ -551,22 +616,13 @@ def page_demetra():
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
 
     rows = []
-
     if planilha is not None:
         demetra_df = process_demetra_excel(planilha)
         if not demetra_df.empty:
             ganhos_excel = demetra_df["ganhos"].sum()
             rake_excel = demetra_df["rake"].sum()
             total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA, REBATE_DEMETRA)
-            rows.append({
-                "AGENTE": AGENTE_PLANILHA_DEMETRA,
-                "GANHOS": ganhos_excel,
-                "RAKE": rake_excel,
-                "RB": f"{int(RB_DEMETRA_PLANILHA)}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
+            rows.append({"AGENTE": AGENTE_PLANILHA_DEMETRA, "GANHOS": ganhos_excel, "RAKE": rake_excel, "RB": f"{int(RB_DEMETRA_PLANILHA)}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
         else:
             st.info("Nenhuma linha encontrada para TheShark_ com ID 11719117 na planilha.")
 
@@ -574,15 +630,7 @@ def page_demetra():
         df_pdf = process_pdf_by_client(pdf, "Demetra")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
-            rows.append({
-                "AGENTE": row["agente"],
-                "GANHOS": float(row["ganhos"]),
-                "RAKE": float(row["rake"]),
-                "RB": f"{int(float(row['rb_percentual']))}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
+            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
 
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
@@ -599,22 +647,12 @@ def page_oscar():
     st.subheader("Oscar")
     periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="oscar_pdf")
-
     rows = []
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Oscar")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
-            rows.append({
-                "AGENTE": row["agente"],
-                "GANHOS": float(row["ganhos"]),
-                "RAKE": float(row["rake"]),
-                "RB": f"{int(float(row['rb_percentual']))}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
-
+            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
     if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
         if not rows:
             st.warning("Envie o PDF.")
@@ -629,13 +667,15 @@ def page_oscar():
 def page_alex():
     st.subheader("Alex")
     periodo = st.text_input("Período do fechamento", key="periodo_alex", placeholder="06/04/2026 a 12/04/2026")
-    pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="alex_pdf")
+    pdf = st.file_uploader("Envie o PDF do Alex", type=["pdf"], key="alex_pdf")
+    imagem = st.file_uploader("Envie a imagem Gustavo | Casarica", type=["png", "jpg", "jpeg", "webp"], key="alex_img")
 
     rows = []
+
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Alex")
         for _, row in df_pdf.iterrows():
-            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_ALEX)
+            total_base, rebate, total_final = calc_alex_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
             rows.append({
                 "AGENTE": row["agente"],
                 "GANHOS": float(row["ganhos"]),
@@ -646,14 +686,32 @@ def page_alex():
                 "_TOTAL_FINAL": total_final,
             })
 
+    if imagem is not None:
+        img = Image.open(imagem)
+        if detect_alex_casarica_image(img):
+            dados = extract_alex_casarica_values(img)
+            with st.expander("Diagnóstico OCR - Casarica", expanded=False):
+                st.code(dados["ocr_text"])
+            rows.append({
+                "AGENTE": dados["agente"],
+                "GANHOS": dados["ganhos"],
+                "RAKE": dados["rake"],
+                "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
+                "TOTAL": dados["total_base"],
+                "_REBATE": dados["rebate"],
+                "_TOTAL_FINAL": dados["total_final"],
+            })
+        else:
+            st.warning("Não identifiquei a imagem Gustavo | Casarica com segurança.")
+
     if st.button("Gerar fechamento Alex", type="primary", key="btn_alex"):
         if not rows:
-            st.warning("Envie o PDF.")
+            st.warning("Envie o PDF e/ou a imagem do Casarica.")
             return
         detalhado = pd.DataFrame(rows)
         rebate_total = detalhado["_REBATE"].sum()
         total_geral = detalhado["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("ALEX", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-5% total")
+        report = generate_client_table_image("ALEX", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "Ajuste Alex")
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
 
