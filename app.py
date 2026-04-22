@@ -1,5 +1,5 @@
 # ============================================================
-# FECHAMENTOS PREMIER - APP FINAL
+# FECHAMENTOS PREMIER - APP FINAL CORRIGIDO DEFINITIVO
 # ------------------------------------------------------------
 # Clientes:
 # - Harnefer: OCR em imagem
@@ -7,29 +7,10 @@
 # - Oscar: PDF
 # - Alex: PDF + imagem Casarica (2 formatos)
 #
-# Alex - imagem Casarica aceita:
-# 1) Formato antigo:
-#    - PROFIT/LOSS -> ganhos
-#    - RAKE 70%    -> rake exibido
-#    - rakeback real = rake_70 * (65/70)
-#
-# 2) Formato novo:
-#    - Taxa   -> rake
-#    - Ganhos -> ganhos
-#    - rakeback real = rake * 65%
-#
-# Regras:
-# - Harnefer: RB 76%, sem rebate
-# - Demetra: rebate -5% se positivo
-# - Oscar: rebate -10% se positivo
-# - Alex:
-#     positivo -> rebate -5%
-#     negativo -> rebate +5%
-#
-# Layout:
-# - relatórios em imagem
-# - quebra automática de linha na coluna AGENTE
-# - fonte do AGENTE menor para evitar estouro
+# CORREÇÃO DEFINITIVA DO CASARICA NOVO:
+# - leitura por recorte obrigatório dos blocos "Taxa" e "Ganhos"
+# - ignora ID, %, "retorno de taxa" e outros números da tela
+# - só usa fallback textual no formato antigo (profit/loss)
 # ============================================================
 
 import io
@@ -51,7 +32,7 @@ except Exception:
 st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 
 # =========================
-# CONFIGURAÇÕES GERAIS
+# CONFIGURAÇÕES
 # =========================
 RB_HARNEFER = 76.0
 RB_DEMETRA_PLANILHA = 70.0
@@ -59,6 +40,7 @@ REBATE_DEMETRA = -5.0
 REBATE_OSCAR = -10.0
 REBATE_ALEX_POSITIVO = -5.0
 REBATE_ALEX_NEGATIVO = 5.0
+
 RB_ALEX_IMAGEM_REAL = 65.0
 RB_ALEX_IMAGEM_EXIBIDO = 70.0
 
@@ -84,7 +66,7 @@ MAPA_IDS_PDF = {
 }
 
 # =========================
-# CORES
+# CORES / LAYOUT
 # =========================
 NAVY = (7, 29, 69)
 GOLD = (199, 143, 43)
@@ -97,9 +79,6 @@ YELLOW = (248, 238, 27)
 LIGHT_GRAY = (230, 230, 230)
 GRID = (90, 90, 90)
 
-# =========================
-# FONTES / TAMANHOS
-# =========================
 FONT_TITLE = 45
 FONT_SUBTITLE = 36
 FONT_HEADER = 30
@@ -116,12 +95,14 @@ TABLE_ROW_H_MIN = 52
 TABLE_TOP = 220
 TABLE_HEADER_H = 52
 
+
 # =========================
 # UTILITÁRIOS
 # =========================
 def fmt_brl(v: float) -> str:
     s = f"{float(v):,.2f}"
     return s.replace(",", "X").replace(".", ",").replace("X", ".")
+
 
 def parse_money(value) -> float:
     if value is None:
@@ -158,10 +139,12 @@ def parse_money(value) -> float:
     except Exception:
         return 0.0
 
+
 def to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
+
 
 def get_font(size: int, bold: bool = False):
     candidates = [
@@ -173,15 +156,18 @@ def get_font(size: int, bold: bool = False):
             return ImageFont.truetype(p, size=size)
     return ImageFont.load_default()
 
+
 def measure(draw, text, font):
     box = draw.textbbox((0, 0), text, font=font)
     return box[2] - box[0], box[3] - box[1]
+
 
 def normalize_id(v) -> str:
     s = str(v).strip()
     if s.endswith(".0"):
         s = s[:-2]
     return re.sub(r"[^\d]", "", s)
+
 
 def wrap_text(draw, text, font, max_width):
     words = str(text).split()
@@ -200,15 +186,17 @@ def wrap_text(draw, text, font, max_width):
         lines.append(current)
     return lines if lines else [""]
 
+
 # =========================
 # OCR
 # =========================
 def preprocess_for_ocr(img: Image.Image) -> Image.Image:
     g = img.convert("L")
     g = ImageOps.autocontrast(g)
-    g = ImageEnhance.Contrast(g).enhance(2.7)
+    g = ImageEnhance.Contrast(g).enhance(2.8)
     g = g.filter(ImageFilter.SHARPEN)
     return g
+
 
 def ocr_image(img: Image.Image, psm: int = 6) -> str:
     if not TESSERACT_OK:
@@ -219,6 +207,34 @@ def ocr_image(img: Image.Image, psm: int = 6) -> str:
     except Exception:
         return ""
 
+
+def first_money(text: str) -> float:
+    for pat in [
+        r"([\-]?[0-9]{1,3}(?:[,\.][0-9]{3})*[,\.][0-9]{2})",
+        r"([\-]?[0-9]+[,\.][0-9]{2})",
+    ]:
+        m = re.search(pat, text)
+        if m:
+            return parse_money(m.group(1))
+    return 0.0
+
+
+def extract_all_money(text: str):
+    matches = re.findall(r"[\-]?[0-9]{1,3}(?:[,\.][0-9]{3})*[,\.][0-9]{2}|[\-]?[0-9]+[,\.][0-9]{2}", text)
+    return [parse_money(m) for m in matches]
+
+
+def ocr_crop_value(img: Image.Image, box) -> tuple[str, float]:
+    crop = img.crop(box)
+    txt = ocr_image(crop, psm=6) + "\n" + ocr_image(crop, psm=11)
+    vals = extract_all_money(txt)
+    # escolhe primeiro valor plausível
+    for v in vals:
+        if abs(v) < 100000:
+            return txt, v
+    return txt, 0.0
+
+
 # =========================
 # HARNEFER
 # =========================
@@ -226,16 +242,11 @@ def detect_harnefer_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("TOTAL FEE" in text and "WINNINGS" in text) or ("GAMES" in text and "ADMIN FEE" in text)
 
+
 def crop_harnefer_summary(img: Image.Image) -> Image.Image:
     w, h = img.size
     return img.crop((int(w * 0.08), int(h * 0.32), int(w * 0.93), int(h * 0.64)))
 
-def first_money(text: str) -> float:
-    for pat in [r"([0-9]{1,3}(?:[,\.][0-9]{3})*[,\.][0-9]{2})", r"([0-9]+[,\.][0-9]{2})"]:
-        m = re.search(pat, text)
-        if m:
-            return parse_money(m.group(1))
-    return 0.0
 
 def extract_harnefer_values(img: Image.Image) -> dict:
     crop = crop_harnefer_summary(img)
@@ -257,16 +268,18 @@ def extract_harnefer_values(img: Image.Image) -> dict:
         "crop": crop,
     }
 
+
 # =========================
-# ALEX - IMAGEM CASARICA
+# ALEX - CASARICA
 # =========================
 def detect_alex_casarica_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return (
         ("GUSTAVO" in text and "CASARICA" in text)
-        or ("PROFIT" in text and "LOSS" in text and "RAKE 70" in text)
+        or ("PROFIT" in text and "LOSS" in text and "RAKE" in text)
         or ("TAXA" in text and "GANHOS" in text)
     )
+
 
 def extract_labeled_money(text: str, label_pattern: str) -> float:
     m = re.search(label_pattern + r"[^0-9\-]*([\-]?[0-9][0-9\.,]+)", text, flags=re.IGNORECASE)
@@ -274,24 +287,23 @@ def extract_labeled_money(text: str, label_pattern: str) -> float:
         return parse_money(m.group(1))
     return 0.0
 
+
 def extract_alex_casarica_values(img: Image.Image) -> dict:
     text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
     text_upper = text.upper()
 
-    # Formato 1: PROFIT/LOSS + RAKE 70%
+    # FORMATO ANTIGO - ainda pode usar texto
     if "PROFIT" in text_upper and "LOSS" in text_upper and "RAKE" in text_upper:
         ganhos = extract_labeled_money(text, r"PROFIT\s*/\s*LOSS")
         rake70 = extract_labeled_money(text, r"RAKE\s*70%?")
         rakeback = rake70 * (RB_ALEX_IMAGEM_REAL / RB_ALEX_IMAGEM_EXIBIDO)
         total_base = ganhos + rakeback
-
         if total_base > 0:
             rebate = total_base * (REBATE_ALEX_POSITIVO / 100.0)
         elif total_base < 0:
             rebate = total_base * (REBATE_ALEX_NEGATIVO / 100.0)
         else:
             rebate = 0.0
-
         total_final = total_base + rebate
         return {
             "agente": "Gustavo | Casarica",
@@ -303,11 +315,52 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
             "total_final": total_final,
             "ocr_text": text,
             "formato": "profit_loss",
+            "ocr_taxa_crop": "",
+            "ocr_ganhos_crop": "",
         }
 
-    # Formato 2: Taxa + Ganhos
-    ganhos = extract_labeled_money(text, r"GANHOS")
-    rake = extract_labeled_money(text, r"TAXA")
+    # FORMATO NOVO - recorte obrigatório, sem fallback perigoso
+    w, h = img.size
+
+    # Recortes mais estreitos para fugir do ID, 70% e campos inferiores
+    taxa_box = (
+        int(w * 0.06),
+        int(h * 0.48),
+        int(w * 0.34),
+        int(h * 0.68),
+    )
+    ganhos_box = (
+        int(w * 0.66),
+        int(h * 0.48),
+        int(w * 0.94),
+        int(h * 0.68),
+    )
+
+    taxa_txt, rake = ocr_crop_value(img, taxa_box)
+    ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
+
+    # Validação forte: não aceitar valores absurdos
+    if abs(rake) > 50000:
+        rake = 0.0
+    if abs(ganhos) > 50000:
+        ganhos = 0.0
+
+    # Se ambos falharem, não tenta leitura global perigosa
+    if rake == 0.0 and ganhos == 0.0:
+        return {
+            "agente": "Gustavo | Casarica",
+            "ganhos": 0.0,
+            "rake": 0.0,
+            "rb_percentual": RB_ALEX_IMAGEM_REAL,
+            "total_base": 0.0,
+            "rebate": 0.0,
+            "total_final": 0.0,
+            "ocr_text": text,
+            "formato": "taxa_ganhos_falhou",
+            "ocr_taxa_crop": taxa_txt,
+            "ocr_ganhos_crop": ganhos_txt,
+        }
+
     rakeback = rake * (RB_ALEX_IMAGEM_REAL / 100.0)
     total_base = ganhos + rakeback
 
@@ -328,11 +381,14 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
         "rebate": rebate,
         "total_final": total_final,
         "ocr_text": text,
-        "formato": "taxa_ganhos",
+        "formato": "taxa_ganhos_recorte",
+        "ocr_taxa_crop": taxa_txt,
+        "ocr_ganhos_crop": ganhos_txt,
     }
 
+
 # =========================
-# PLANILHA DEMETRA
+# DEMETRA
 # =========================
 def process_demetra_excel(uploaded_file):
     df = pd.read_excel(uploaded_file, usecols=[5, 6, 7, 8, 9, 29])
@@ -348,6 +404,7 @@ def process_demetra_excel(uploaded_file):
     mask = (df["id_conta"] == ID_PLANILHA_DEMETRA) & (df["origem"] == ORIGEM_PLANILHA_DEMETRA)
     return df[mask].copy()
 
+
 # =========================
 # PDF
 # =========================
@@ -358,6 +415,7 @@ def extract_pdf_lines(uploaded_file):
             text = page.extract_text() or ""
             lines.extend([ln.strip() for ln in text.splitlines() if ln.strip()])
     return lines
+
 
 def process_pdf_by_client(uploaded_file, cliente_alvo: str):
     rows = []
@@ -377,13 +435,9 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
         ganhos = parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
         agente = re.sub(r"\s{2,}", " ", line.split(id_agente)[0].strip())
-        rows.append({
-            "agente": agente,
-            "ganhos": ganhos,
-            "rake": rake,
-            "rb_percentual": float(info["rb"])
-        })
+        rows.append({"agente": agente, "ganhos": ganhos, "rake": rake, "rb_percentual": float(info["rb"])})
     return pd.DataFrame(rows)
+
 
 # =========================
 # CÁLCULOS
@@ -394,6 +448,7 @@ def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual
     rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
     total_final = total_base + rebate
     return total_base, rebate, total_final
+
 
 def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
     rb_valor = rake * (rb_percentual / 100.0)
@@ -407,8 +462,9 @@ def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
     total_final = total_base + rebate
     return total_base, rebate, total_final
 
+
 # =========================
-# RELATÓRIO SIMPLES / HARNEFER
+# RELATÓRIOS
 # =========================
 def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: float, total_final: float) -> Image.Image:
     W, H = SUMMARY_W, SUMMARY_H
@@ -485,6 +541,7 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((start_x + stw + 24, 744), status_value, fill=GREEN if total_final >= 0 else RED, font=status_value_font)
     return img
 
+
 def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
     return generate_summary_report(
         "HARNEFER",
@@ -495,9 +552,7 @@ def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.
         ganhos + rake * (RB_HARNEFER / 100.0),
     )
 
-# =========================
-# RELATÓRIO TABELA COM WRAP
-# =========================
+
 def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str) -> Image.Image:
     temp_img = Image.new("RGB", (10, 10), WHITE)
     temp_draw = ImageDraw.Draw(temp_img)
@@ -606,8 +661,8 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     start_x = (W - (stw + 20 + svw)) / 2
     draw.text((start_x, box_y1 + 28), status_text, fill=NAVY, font=status_font)
     draw.text((start_x + stw + 20, box_y1 + 24), status_value, fill=GREEN if total_geral >= 0 else RED, font=status_value_font)
-
     return img
+
 
 # =========================
 # PÁGINAS
@@ -637,6 +692,7 @@ def page_harnefer():
         report = generate_harnefer_report(periodo.strip() or "-", dados["ganhos"], dados["rake"])
         st.image(report, caption="Relatório final", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="harnefer_fechamento.png", mime="image/png")
+
 
 def page_demetra():
     st.subheader("Demetra")
@@ -672,6 +728,7 @@ def page_demetra():
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="demetra_fechamento.png", mime="image/png")
 
+
 def page_oscar():
     st.subheader("Oscar")
     periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
@@ -686,12 +743,13 @@ def page_oscar():
         if not rows:
             st.warning("Envie o PDF.")
             return
-        detalhado = pd.DataFrame(rows)
-        rebate_total = detalhado["_REBATE"].sum()
-        total_geral = detalhado["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("OSCAR", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-10% total")
+        დეტ = pd.DataFrame(rows)
+        rebate_total = დეტ["_REBATE"].sum()
+        total_geral = დეტ["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image("OSCAR", periodo.strip() or "-", დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-10% total")
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
+
 
 def page_alex():
     st.subheader("Alex")
@@ -721,16 +779,22 @@ def page_alex():
             dados = extract_alex_casarica_values(img)
             with st.expander("Diagnóstico OCR - Casarica", expanded=False):
                 st.write(f"Formato detectado: {dados['formato']}")
-                st.code(dados["ocr_text"])
-            rows.append({
-                "AGENTE": dados["agente"],
-                "GANHOS": dados["ganhos"],
-                "RAKE": dados["rake"],
-                "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
-                "TOTAL": dados["total_base"],
-                "_REBATE": dados["rebate"],
-                "_TOTAL_FINAL": dados["total_final"],
-            })
+                if dados["ocr_taxa_crop"]:
+                    st.code("OCR recorte Taxa:\n" + dados["ocr_taxa_crop"])
+                if dados["ocr_ganhos_crop"]:
+                    st.code("OCR recorte Ganhos:\n" + dados["ocr_ganhos_crop"])
+            if dados["formato"] == "taxa_ganhos_falhou":
+                st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem.")
+            else:
+                rows.append({
+                    "AGENTE": dados["agente"],
+                    "GANHOS": dados["ganhos"],
+                    "RAKE": dados["rake"],
+                    "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
+                    "TOTAL": dados["total_base"],
+                    "_REBATE": dados["rebate"],
+                    "_TOTAL_FINAL": dados["total_final"],
+                })
         else:
             st.warning("Não identifiquei a imagem Gustavo | Casarica com segurança.")
 
@@ -738,16 +802,14 @@ def page_alex():
         if not rows:
             st.warning("Envie o PDF e/ou a imagem do Casarica.")
             return
-        detalhado = pd.DataFrame(rows)
-        rebate_total = detalhado["_REBATE"].sum()
-        total_geral = detalhado["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("ALEX", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "Ajuste Alex")
+        დეტ = pd.DataFrame(rows)
+        rebate_total = დეტ["_REBATE"].sum()
+        total_geral = დეტ["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image("ALEX", periodo.strip() or "-", დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "Ajuste Alex")
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
 
-# =========================
-# APP PRINCIPAL
-# =========================
+
 st.title("Fechamentos Premier")
 cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra", "Oscar", "Alex"])
 
