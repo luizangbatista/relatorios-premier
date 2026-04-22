@@ -1,5 +1,5 @@
 # ============================================================
-# FECHAMENTOS PREMIER - APP FINAL COM LOGO REAL
+# FECHAMENTOS PREMIER - APP FINAL COM LOGO REAL E TOTAIS CORRIGIDOS
 # ------------------------------------------------------------
 # Clientes:
 # - Harnefer: OCR em imagem
@@ -11,6 +11,11 @@
 # - Coloque a logo real na mesma pasta do app com o nome:
 #       logo_premier.png
 # - Se a logo não existir, o app continua funcionando.
+#
+# CORREÇÃO IMPORTANTE
+# - Linha azul "TOTAL" = total base antes do rebate
+# - Linha cinza = rebate
+# - Linha amarela "TOTAL" = total final após rebate
 # ============================================================
 
 import io
@@ -36,8 +41,8 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 # ============================================================
 STYLE = {
     "logo_path": "logo_premier.png",
-    "logo_max_w": 430,
-    "logo_max_h": 150,
+    "logo_max_w": 420,
+    "logo_max_h": 145,
     "page_bg": (245, 245, 245),
     "navy": (7, 29, 69),
     "gold": (199, 143, 43),
@@ -283,7 +288,6 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
     text = ocr_image(img, 6) + "\n" + ocr_image(img, 11)
     text_upper = text.upper()
 
-    # Formato antigo
     if "PROFIT" in text_upper and "LOSS" in text_upper and "RAKE" in text_upper:
         ganhos = extract_labeled_money(text, r"PROFIT\s*/\s*LOSS")
         rake70 = extract_labeled_money(text, r"RAKE\s*70%?")
@@ -309,7 +313,6 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
             "ocr_ganhos_crop": "",
         }
 
-    # Formato novo - recorte obrigatório
     w, h = img.size
     taxa_box = (int(w * 0.06), int(h * 0.48), int(w * 0.34), int(h * 0.68))
     ganhos_box = (int(w * 0.66), int(h * 0.48), int(w * 0.94), int(h * 0.68))
@@ -416,7 +419,8 @@ def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual
     rb_valor = rake * (rb_percentual / 100.0)
     total_base = ganhos + rb_valor
     rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
-    return total_base, rebate, total_base + rebate
+    total_final = total_base + rebate
+    return total_base, rebate, total_final
 
 def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
     rb_valor = rake * (rb_percentual / 100.0)
@@ -427,10 +431,11 @@ def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
         rebate = total_base * (REBATE_ALEX_NEGATIVO / 100.0)
     else:
         rebate = 0.0
-    return total_base, rebate, total_base + rebate
+    total_final = total_base + rebate
+    return total_base, rebate, total_final
 
 # ============================================================
-# GERAÇÃO DE IMAGENS
+# GERAÇÃO DE RELATÓRIOS
 # ============================================================
 def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: float, total_final: float) -> Image.Image:
     W, H = STYLE["summary_w"], STYLE["summary_h"]
@@ -472,12 +477,14 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
 
     for i, col in enumerate(headers):
         cx = table_x1 + i * col_w + col_w / 2
-        draw.text((cx - measure(draw, col, header_font)[0] / 2, header_y1 + 22), col, fill=STYLE["white"], font=header_font)
+        cw, _ = measure(draw, col, header_font)
+        draw.text((cx - cw / 2, header_y1 + 22), col, fill=STYLE["white"], font=header_font)
 
     for i, val in enumerate(values):
         sval = fmt_brl(val)
         cx = table_x1 + i * col_w + col_w / 2
-        draw.text((cx - measure(draw, sval, value_font)[0] / 2, values_y1 + 45), sval, fill=STYLE["navy"], font=value_font)
+        vw, _ = measure(draw, sval, value_font)
+        draw.text((cx - vw / 2, values_y1 + 45), sval, fill=STYLE["navy"], font=value_font)
 
     draw.rectangle((60, 490, 1340, 550), fill=STYLE["light_gray"])
     rebate_label = "-5% total" if rebate != 0 else "Sem rebate"
@@ -486,9 +493,9 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((1310 - measure(draw, rebate_value, value_font)[0], 506), rebate_value, fill=STYLE["navy"], font=value_font)
 
     draw.rectangle((60, 550, 1340, 635), fill=STYLE["yellow"])
-    tvalue = fmt_brl(total_final)
+    final_str = fmt_brl(total_final)
     draw.text((1040 - measure(draw, "TOTAL", total_font)[0], 575), "TOTAL", fill=(0, 0, 0), font=total_font)
-    draw.text((1310 - measure(draw, tvalue, total_font)[0], 575), tvalue, fill=(0, 0, 0), font=total_font)
+    draw.text((1310 - measure(draw, final_str, total_font)[0], 575), final_str, fill=(0, 0, 0), font=total_font)
 
     status_text = "PREMIER TEM A PAGAR" if total_final > 0 else ("PREMIER TEM A RECEBER" if total_final < 0 else "SEM VALORES")
     status_value = f"R$ {fmt_brl(abs(total_final))}"
@@ -498,6 +505,7 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     start_x = (W - (stw + 24 + svw)) / 2
     draw.text((start_x, 748), status_text, fill=STYLE["navy"], font=status_font)
     draw.text((start_x + stw + 24, 744), status_value, fill=STYLE["green"] if total_final >= 0 else STYLE["red"], font=status_value_font)
+
     return img
 
 def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
@@ -510,7 +518,15 @@ def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.
         ganhos + rake * (RB_HARNEFER / 100.0),
     )
 
-def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str) -> Image.Image:
+def generate_client_table_image(
+    titulo: str,
+    periodo: str,
+    df: pd.DataFrame,
+    total_base_geral: float,
+    rebate_total: float,
+    total_final_geral: float,
+    rebate_label: str,
+) -> Image.Image:
     temp_img = Image.new("RGB", (10, 10), STYLE["white"])
     temp_draw = ImageDraw.Draw(temp_img)
     cell_font = get_font(STYLE["font_cell"])
@@ -525,7 +541,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 
     H = STYLE["top_block_h"] + STYLE["table_header_h"] + sum(row_heights) + (3 * STYLE["table_row_h_min"]) + 170
     W = STYLE["table_w"]
-
     img = Image.new("RGB", (W, H), STYLE["page_bg"])
     draw = ImageDraw.Draw(img)
 
@@ -539,7 +554,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     status_font = get_font(STYLE["font_status"], True)
     status_value_font = get_font(STYLE["font_status_value"], True)
 
-    # topo
     logo = load_logo()
     left_x = 40
     right_x = 760
@@ -570,7 +584,8 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.rectangle((x1, y, x1 + table_w, y + STYLE["table_header_h"]), fill=STYLE["navy"])
     for i, htxt in enumerate(headers):
         cx = (xs[i] + xs[i + 1]) / 2
-        draw.text((cx - measure(draw, htxt, header_font)[0] / 2, y + 12), htxt, fill=STYLE["white"], font=header_font)
+        cw, _ = measure(draw, htxt, header_font)
+        draw.text((cx - cw / 2, y + 12), htxt, fill=STYLE["white"], font=header_font)
 
     y += STYLE["table_header_h"]
     for idx, row in df.iterrows():
@@ -590,14 +605,15 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 
         y += row_h
 
-    # total / rebate / total final
+    # TOTAL BASE (azul)
     draw.rectangle((x1, y, x1 + table_w, y + STYLE["table_row_h_min"]), fill=STYLE["white"], outline=STYLE["grid"], width=2)
     draw.rectangle((x1, y, xs[4], y + STYLE["table_row_h_min"]), fill=STYLE["navy"])
-    total_str = fmt_brl(total_geral)
+    base_str = fmt_brl(total_base_geral)
     draw.text((xs[4] - measure(draw, "TOTAL", total_font)[0] - 16, y + 10), "TOTAL", fill=STYLE["white"], font=total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - measure(draw, total_str, total_font)[0] / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
+    draw.text((((xs[4] + xs[5]) / 2) - measure(draw, base_str, total_font)[0] / 2, y + 10), base_str, fill=(0, 0, 0), font=total_font)
     y += STYLE["table_row_h_min"]
 
+    # REBATE
     draw.rectangle((x1, y, x1 + table_w, y + STYLE["table_row_h_min"]), fill=STYLE["light_gray"], outline=STYLE["grid"], width=2)
     rlabel = rebate_label if rebate_total != 0 else "Sem rebate"
     rvalue = fmt_brl(rebate_total) if rebate_total != 0 else "0,00"
@@ -605,13 +621,15 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     draw.text((((xs[4] + xs[5]) / 2) - measure(draw, rvalue, cell_font)[0] / 2, y + 12), rvalue, fill=(0, 0, 0), font=cell_font)
     y += STYLE["table_row_h_min"]
 
+    # TOTAL FINAL (amarelo)
     draw.rectangle((x1, y, x1 + table_w, y + STYLE["table_row_h_min"]), fill=STYLE["yellow"], outline=STYLE["grid"], width=2)
+    final_str = fmt_brl(total_final_geral)
     draw.text((xs[4] - measure(draw, "TOTAL", total_font)[0] - 16, y + 10), "TOTAL", fill=(0, 0, 0), font=total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - measure(draw, total_str, total_font)[0] / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
+    draw.text((((xs[4] + xs[5]) / 2) - measure(draw, final_str, total_font)[0] / 2, y + 10), final_str, fill=(0, 0, 0), font=total_font)
     y += STYLE["table_row_h_min"]
 
-    status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
-    status_value = f"R$ {fmt_brl(abs(total_geral))}"
+    status_text = "PREMIER TEM A PAGAR" if total_final_geral > 0 else ("PREMIER TEM A RECEBER" if total_final_geral < 0 else "SEM VALORES")
+    status_value = f"R$ {fmt_brl(abs(total_final_geral))}"
     box_y1 = y + 35
     box_y2 = box_y1 + STYLE["status_box_h"]
     draw.rounded_rectangle((50, box_y1, x1 + table_w, box_y2), radius=14, outline=STYLE["navy"], width=3, fill=STYLE["light_bg"])
@@ -619,7 +637,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     svw, _ = measure(draw, status_value, status_value_font)
     start_x = (W - (stw + 20 + svw)) / 2
     draw.text((start_x, box_y1 + 28), status_text, fill=STYLE["navy"], font=status_font)
-    draw.text((start_x + stw + 20, box_y1 + 24), status_value, fill=STYLE["green"] if total_geral >= 0 else STYLE["red"], font=status_value_font)
+    draw.text((start_x + stw + 20, box_y1 + 24), status_value, fill=STYLE["green"] if total_final_geral >= 0 else STYLE["red"], font=status_value_font)
 
     return img
 
@@ -666,7 +684,15 @@ def page_demetra():
             ganhos_excel = demetra_df["ganhos"].sum()
             rake_excel = demetra_df["rake"].sum()
             total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA, REBATE_DEMETRA)
-            rows.append({"AGENTE": AGENTE_PLANILHA_DEMETRA, "GANHOS": ganhos_excel, "RAKE": rake_excel, "RB": f"{int(RB_DEMETRA_PLANILHA)}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": AGENTE_PLANILHA_DEMETRA,
+                "GANHOS": ganhos_excel,
+                "RAKE": rake_excel,
+                "RB": f"{int(RB_DEMETRA_PLANILHA)}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
         else:
             st.info("Nenhuma linha encontrada para TheShark_ com ID 11719117 na planilha.")
 
@@ -674,14 +700,33 @@ def page_demetra():
         df_pdf = process_pdf_by_client(pdf, "Demetra")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
 
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
             st.warning("Envie a planilha e/ou o PDF.")
             return
         df = pd.DataFrame(rows)
-        report = generate_client_table_image("DEMETRA", periodo.strip() or "-", df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], df["_TOTAL_FINAL"].sum(), df["_REBATE"].sum(), "-5% total")
+        total_base_geral = df["TOTAL"].sum()
+        rebate_total = df["_REBATE"].sum()
+        total_final_geral = df["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image(
+            "DEMETRA",
+            periodo.strip() or "-",
+            df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_base_geral,
+            rebate_total,
+            total_final_geral,
+            "-5% total",
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="demetra_fechamento.png", mime="image/png")
 
@@ -695,14 +740,33 @@ def page_oscar():
         df_pdf = process_pdf_by_client(pdf, "Oscar")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
 
     if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
         if not rows:
             st.warning("Envie o PDF.")
             return
         df = pd.DataFrame(rows)
-        report = generate_client_table_image("OSCAR", periodo.strip() or "-", df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], df["_TOTAL_FINAL"].sum(), df["_REBATE"].sum(), "-10% total")
+        total_base_geral = df["TOTAL"].sum()
+        rebate_total = df["_REBATE"].sum()
+        total_final_geral = df["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image(
+            "OSCAR",
+            periodo.strip() or "-",
+            df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_base_geral,
+            rebate_total,
+            total_final_geral,
+            "-10% total",
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
 
@@ -718,7 +782,15 @@ def page_alex():
         df_pdf = process_pdf_by_client(pdf, "Alex")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_alex_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
 
     if imagem is not None:
         img = Image.open(imagem)
@@ -733,7 +805,15 @@ def page_alex():
             if dados["formato"] == "taxa_ganhos_falhou":
                 st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem.")
             else:
-                rows.append({"AGENTE": dados["agente"], "GANHOS": dados["ganhos"], "RAKE": dados["rake"], "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%", "TOTAL": dados["total_base"], "_REBATE": dados["rebate"], "_TOTAL_FINAL": dados["total_final"]})
+                rows.append({
+                    "AGENTE": dados["agente"],
+                    "GANHOS": dados["ganhos"],
+                    "RAKE": dados["rake"],
+                    "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
+                    "TOTAL": dados["total_base"],
+                    "_REBATE": dados["rebate"],
+                    "_TOTAL_FINAL": dados["total_final"],
+                })
         else:
             st.warning("Não identifiquei a imagem Gustavo | Casarica com segurança.")
 
@@ -742,7 +822,18 @@ def page_alex():
             st.warning("Envie o PDF e/ou a imagem do Casarica.")
             return
         df = pd.DataFrame(rows)
-        report = generate_client_table_image("ALEX", periodo.strip() or "-", df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], df["_TOTAL_FINAL"].sum(), df["_REBATE"].sum(), "Ajuste Alex")
+        total_base_geral = df["TOTAL"].sum()
+        rebate_total = df["_REBATE"].sum()
+        total_final_geral = df["_TOTAL_FINAL"].sum()
+        report = generate_client_table_image(
+            "ALEX",
+            periodo.strip() or "-",
+            df[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_base_geral,
+            rebate_total,
+            total_final_geral,
+            "Ajuste Alex",
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
 
