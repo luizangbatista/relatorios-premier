@@ -63,6 +63,7 @@ MAPA_IDS_PDF = {
     "13379845": {"cliente": "Alex", "rb": 60.0},
     "13104440": {"cliente": "Alex", "rb": 50.0},
     "13472941": {"cliente": "Oscar", "rb": 65.0},
+    "13470981": {"cliente": "Oscar", "rb": 65.0},
 }
 
 # =========================
@@ -553,7 +554,7 @@ def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.
     )
 
 
-def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str) -> Image.Image:
+def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str, total_base_exibido: float | None = None) -> Image.Image:
     temp_img = Image.new("RGB", (10, 10), WHITE)
     temp_draw = ImageDraw.Draw(temp_img)
     cell_font = get_font(FONT_CELL, bold=False)
@@ -580,6 +581,10 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     total_font = get_font(FONT_TOTAL, bold=True)
     status_font = get_font(FONT_STATUS, bold=True)
     status_value_font = get_font(FONT_STATUS_VALUE, bold=True)
+
+    # TOTAL azul: por padrão mantém o comportamento antigo.
+    # Quando informado, exibe o total base antes do ajuste.
+    total_azul = total_geral if total_base_exibido is None else total_base_exibido
 
     tw, _ = measure(draw, titulo, title_font)
     draw.text(((W - tw) / 2, 20), titulo, fill=NAVY, font=title_font)
@@ -630,9 +635,9 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     total_label = "TOTAL"
     tlw, _ = measure(draw, total_label, total_font)
     draw.text((xs[4] - tlw - 16, y + 10), total_label, fill=WHITE, font=total_font)
-    total_str = fmt_brl(total_geral)
-    tvw, _ = measure(draw, total_str, total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
+    total_azul_str = fmt_brl(total_azul)
+    tvw, _ = measure(draw, total_azul_str, total_font)
+    draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_azul_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=LIGHT_GRAY, outline=GRID, width=2)
@@ -645,10 +650,11 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     y += TABLE_ROW_H_MIN
 
     draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=YELLOW, outline=GRID, width=2)
+    total_final_str = fmt_brl(total_geral)
     flw, _ = measure(draw, total_label, total_font)
-    fvw, _ = measure(draw, total_str, total_font)
+    fvw, _ = measure(draw, total_final_str, total_font)
     draw.text((xs[4] - flw - 16, y + 10), total_label, fill=(0, 0, 0), font=total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_str, fill=(0, 0, 0), font=total_font)
+    draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_final_str, fill=(0, 0, 0), font=total_font)
     y += TABLE_ROW_H_MIN
 
     status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
@@ -803,9 +809,24 @@ def page_alex():
             st.warning("Envie o PDF e/ou a imagem do Casarica.")
             return
         დეტ = pd.DataFrame(rows)
-        rebate_total = დეტ["_REBATE"].sum()
-        total_geral = დეტ["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("ALEX", periodo.strip() or "-", დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "Ajuste Alex")
+
+        # No Alex, o ajuste é aplicado uma única vez sobre o total base.
+        # TOTAL azul = soma dos totais das linhas, sem ajuste.
+        # Linha cinza = -5% do TOTAL azul.
+        # TOTAL amarelo = TOTAL azul + ajuste.
+        total_base_geral = დეტ["TOTAL"].sum()
+        rebate_total = total_base_geral * (REBATE_ALEX_POSITIVO / 100.0)
+        total_geral = total_base_geral + rebate_total
+
+        report = generate_client_table_image(
+            "ALEX",
+            periodo.strip() or "-",
+            დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_geral,
+            rebate_total,
+            "-5% total",
+            total_base_exibido=total_base_geral,
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
 
