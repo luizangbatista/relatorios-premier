@@ -34,7 +34,7 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 # =========================
 # CONFIGURAÇÕES
 # =========================
-RB_HARNEFER = 76.0
+RB_HARNEFER = 70.0
 RB_DEMETRA_PLANILHA = 70.0
 REBATE_DEMETRA = -5.0
 REBATE_OSCAR = -10.0
