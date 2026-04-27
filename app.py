@@ -271,6 +271,45 @@ def extract_harnefer_values(img: Image.Image) -> dict:
 
 
 # =========================
+# OSCAR - SUPREMA (imagem)
+# =========================
+def detect_suprema_image(img: Image.Image) -> bool:
+    text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
+    return "SUPREMA" in text and ("W/L" in text or "RAKE" in text or "RB" in text)
+
+
+def extract_suprema_values(img: Image.Image) -> dict:
+    """Lê a imagem da Suprema: W/L vira ganhos e RAKE vira rake total."""
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    ganhos = 0.0
+    rake = 0.0
+
+    for line in lines:
+        if "SUPREMA" in line.upper():
+            vals = extract_all_money(line)
+            if len(vals) >= 2:
+                ganhos = vals[0]
+                rake = vals[1]
+                break
+
+    if ganhos == 0.0 and rake == 0.0:
+        vals = extract_all_money(text)
+        if len(vals) >= 2:
+            ganhos = vals[0]
+            rake = vals[1]
+
+    return {
+        "agente": "SUPREMA | Agents",
+        "ganhos": ganhos,
+        "rake": rake,
+        "rb_percentual": 65.0,
+        "ocr_text": text,
+    }
+
+
+# =========================
 # ALEX - CASARICA
 # =========================
 def detect_alex_casarica_image(img: Image.Image) -> bool:
@@ -754,30 +793,49 @@ def page_oscar():
     st.subheader("Oscar")
     periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="oscar_pdf")
+    imagem_suprema = st.file_uploader("Envie a imagem da SUPREMA", type=["png", "jpg", "jpeg", "webp"], key="oscar_suprema_img")
     rows = []
+
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Oscar")
         for _, row in df_pdf.iterrows():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
             rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+
+    if imagem_suprema is not None:
+        img = Image.open(imagem_suprema)
+        dados = extract_suprema_values(img)
+        with st.expander("Diagnóstico OCR - SUPREMA", expanded=False):
+            st.code(dados["ocr_text"])
+
+        if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
+            st.warning("Não consegui ler os valores da SUPREMA com segurança nessa imagem.")
+        else:
+            total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_OSCAR)
+            rows.append({
+                "AGENTE": dados["agente"],
+                "GANHOS": dados["ganhos"],
+                "RAKE": dados["rake"],
+                "RB": f"{int(dados['rb_percentual'])}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+
     if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
         if not rows:
-            st.warning("Envie o PDF.")
+            st.warning("Envie o PDF e/ou a imagem da SUPREMA.")
             return
-        დეტ = pd.DataFrame(rows)
+        detalhado = pd.DataFrame(rows)
 
-        # No Oscar, o ajuste é aplicado uma única vez sobre o total base.
-        # TOTAL azul = soma dos totais das linhas, sem ajuste.
-        # Linha cinza = -10% do TOTAL azul, se o total for positivo.
-        # TOTAL amarelo = TOTAL azul + ajuste.
-        total_base_geral = დეტ["TOTAL"].sum()
+        total_base_geral = detalhado["TOTAL"].sum()
         rebate_total = total_base_geral * (REBATE_OSCAR / 100.0) if total_base_geral > 0 else 0.0
         total_geral = total_base_geral + rebate_total
 
         report = generate_client_table_image(
             "OSCAR",
             periodo.strip() or "-",
-            დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
             total_geral,
             rebate_total,
             "-10% total",
@@ -785,7 +843,6 @@ def page_oscar():
         )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
-
 
 def page_alex():
     st.subheader("Alex")
