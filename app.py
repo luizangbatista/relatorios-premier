@@ -789,7 +789,7 @@ def page_alex():
                 rows.append({
                     "AGENTE": dados["agente"],
                     "GANHOS": dados["ganhos"],
-                    "RAKE": dados["rake"],
+                    "RAKE": dados["rake"]/0.7,
                     "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
                     "TOTAL": dados["total_base"],
                     "_REBATE": dados["rebate"],
