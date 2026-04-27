@@ -728,9 +728,24 @@ def page_demetra():
             st.warning("Envie a planilha e/ou o PDF.")
             return
         detalhado = pd.DataFrame(rows)
-        rebate_total = detalhado["_REBATE"].sum()
-        total_geral = detalhado["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("DEMETRA", periodo.strip() or "-", detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-5% total")
+
+        # Na Demetra, o ajuste é aplicado uma única vez sobre o total base.
+        # TOTAL azul = soma dos totais das linhas, sem ajuste.
+        # Linha cinza = -5% do TOTAL azul, se o total for positivo.
+        # TOTAL amarelo = TOTAL azul + ajuste.
+        total_base_geral = detalhado["TOTAL"].sum()
+        rebate_total = total_base_geral * (REBATE_DEMETRA / 100.0) if total_base_geral > 0 else 0.0
+        total_geral = total_base_geral + rebate_total
+
+        report = generate_client_table_image(
+            "DEMETRA",
+            periodo.strip() or "-",
+            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_geral,
+            rebate_total,
+            "-5% total",
+            total_base_exibido=total_base_geral,
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="demetra_fechamento.png", mime="image/png")
 
@@ -750,9 +765,24 @@ def page_oscar():
             st.warning("Envie o PDF.")
             return
         დეტ = pd.DataFrame(rows)
-        rebate_total = დეტ["_REBATE"].sum()
-        total_geral = დეტ["_TOTAL_FINAL"].sum()
-        report = generate_client_table_image("OSCAR", periodo.strip() or "-", დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]], total_geral, rebate_total, "-10% total")
+
+        # No Oscar, o ajuste é aplicado uma única vez sobre o total base.
+        # TOTAL azul = soma dos totais das linhas, sem ajuste.
+        # Linha cinza = -10% do TOTAL azul, se o total for positivo.
+        # TOTAL amarelo = TOTAL azul + ajuste.
+        total_base_geral = დეტ["TOTAL"].sum()
+        rebate_total = total_base_geral * (REBATE_OSCAR / 100.0) if total_base_geral > 0 else 0.0
+        total_geral = total_base_geral + rebate_total
+
+        report = generate_client_table_image(
+            "OSCAR",
+            periodo.strip() or "-",
+            დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            total_geral,
+            rebate_total,
+            "-10% total",
+            total_base_exibido=total_base_geral,
+        )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
 
