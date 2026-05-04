@@ -36,6 +36,7 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 # =========================
 RB_HARNEFER = 70.0
 RB_DEMETRA_PLANILHA = 70.0
+RB_DEMETRA_IMAGEM = 70.0
 REBATE_DEMETRA = -5.0
 REBATE_OSCAR = -10.0
 REBATE_ALEX_POSITIVO = -5.0
@@ -445,6 +446,49 @@ def process_demetra_excel(uploaded_file):
     return df[mask].copy()
 
 
+def detect_demetra_image(img: Image.Image) -> bool:
+    text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
+    return ("KILLUMINATTI" in text or "SUPER AGENTE" in text) and ("RAKE" in text or "GANHOS" in text)
+
+
+def extract_demetra_image_values(img: Image.Image) -> dict:
+    """Lê a imagem do Demetra: extrai RAKE total e GANHOS.
+
+    A porcentagem mostrada na imagem não é usada no cálculo do fechamento;
+    o app aplica RB_DEMETRA_IMAGEM sobre o rake total lido.
+    """
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    agente = "Killuminatti"
+    rake = 0.0
+    ganhos = 0.0
+
+    for line in lines:
+        upper = line.upper()
+        vals = extract_all_money(line)
+        if "KILLUMINATTI" in upper and len(vals) >= 3:
+            rake = vals[0]
+            ganhos = vals[2]
+            break
+
+    # Fallback: no padrão da imagem, os primeiros valores monetários são:
+    # RAKE, -25%, GANHOS, RESULTADO, ADIANTAMENTO, TOTAL.
+    if rake == 0.0 and ganhos == 0.0:
+        vals = extract_all_money(text)
+        if len(vals) >= 3:
+            rake = vals[0]
+            ganhos = vals[2]
+
+    return {
+        "agente": agente,
+        "ganhos": ganhos,
+        "rake": rake,
+        "rb_percentual": RB_DEMETRA_IMAGEM,
+        "ocr_text": text,
+    }
+
+
 # =========================
 # PDF
 # =========================
@@ -744,6 +788,7 @@ def page_demetra():
     periodo = st.text_input("Período do fechamento", key="periodo_demetra", placeholder="06/04/2026 a 12/04/2026")
     planilha = st.file_uploader("Envie a planilha 2101...", type=["xlsx", "xls"], key="demetra_xlsx")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
+    imagem = st.file_uploader("Envie a imagem do Killuminatti", type=["png", "jpg", "jpeg", "webp"], key="demetra_img")
 
     rows = []
     if planilha is not None:
@@ -762,9 +807,32 @@ def page_demetra():
             total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
             rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
 
+    if imagem is not None:
+        img = Image.open(imagem)
+        if detect_demetra_image(img):
+            dados = extract_demetra_image_values(img)
+            with st.expander("Diagnóstico OCR - Demetra imagem", expanded=False):
+                st.code(dados["ocr_text"])
+
+            if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
+                st.warning("Não consegui ler Rake/Ganhos com segurança nessa imagem do Demetra.")
+            else:
+                total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_DEMETRA)
+                rows.append({
+                    "AGENTE": dados["agente"],
+                    "GANHOS": dados["ganhos"],
+                    "RAKE": dados["rake"],
+                    "RB": f"{int(dados['rb_percentual'])}%",
+                    "TOTAL": total_base,
+                    "_REBATE": rebate,
+                    "_TOTAL_FINAL": total_final,
+                })
+        else:
+            st.warning("Não identifiquei a imagem do Demetra com segurança.")
+
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
-            st.warning("Envie a planilha e/ou o PDF.")
+            st.warning("Envie a planilha, o PDF e/ou a imagem do Demetra.")
             return
         detalhado = pd.DataFrame(rows)
 
