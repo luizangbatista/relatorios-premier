@@ -283,33 +283,51 @@ def detect_suprema_image(img: Image.Image) -> bool:
 
 
 def extract_suprema_values(img: Image.Image) -> dict:
-    """Lê a imagem da Suprema: W/L vira ganhos e RAKE vira rake total."""
+    """
+    Lê a imagem da SUPREMA:
+    - W/L = ganhos
+    - RAKE = rake total
+    - RB da imagem é ignorado, pois o app calcula pelo percentual configurado.
+    """
+    w, h = img.size
+
+    # Recorte aproximado da linha da SUPREMA
+    # Colunas visuais: LIGA | W/L | RAKE | RB
+    wl_box = (
+        int(w * 0.33),
+        int(h * 0.43),
+        int(w * 0.58),
+        int(h * 0.62),
+    )
+
+    rake_box = (
+        int(w * 0.56),
+        int(h * 0.43),
+        int(w * 0.79),
+        int(h * 0.62),
+    )
+
+    wl_txt, ganhos = ocr_crop_value(img, wl_box)
+    rake_txt, rake = ocr_crop_value(img, rake_box)
+
+    # Fallback por texto, caso algum recorte falhe
     text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    ganhos = 0.0
-    rake = 0.0
-
-    for line in lines:
-        if "SUPREMA" in line.upper():
-            vals = extract_all_money(line)
-            if len(vals) >= 2:
-                ganhos = vals[0]
-                rake = vals[1]
+    if ganhos == 0.0 or rake == 0.0:
+        for line in text.splitlines():
+            if "SUPREMA" in line.upper():
+                vals = extract_all_money(line)
+                if len(vals) >= 2:
+                    ganhos = vals[0]   # W/L
+                    rake = vals[1]     # RAKE
                 break
-
-    if ganhos == 0.0 and rake == 0.0:
-        vals = extract_all_money(text)
-        if len(vals) >= 2:
-            ganhos = vals[0]
-            rake = vals[1]
 
     return {
         "agente": "SUPREMA | Agents",
         "ganhos": ganhos,
         "rake": rake,
         "rb_percentual": 65.0,
-        "ocr_text": text,
+        "ocr_text": text + "\n\nOCR W/L:\n" + wl_txt + "\n\nOCR RAKE:\n" + rake_txt,
     }
 
 
