@@ -286,48 +286,86 @@ def extract_suprema_values(img: Image.Image) -> dict:
     """
     Lê a imagem da SUPREMA:
     - W/L = ganhos
-    - RAKE = rake total
-    - RB da imagem é ignorado, pois o app calcula pelo percentual configurado.
+    - RAKE = rake
+    - valida pelo TOTAL da imagem
     """
+
     w, h = img.size
 
-    # Recorte aproximado da linha da SUPREMA
-    # Colunas visuais: LIGA | W/L | RAKE | RB
     wl_box = (
-        int(w * 0.33),
-        int(h * 0.43),
+        int(w * 0.30),
+        int(h * 0.42),
         int(w * 0.58),
-        int(h * 0.62),
+        int(h * 0.63),
     )
 
     rake_box = (
-        int(w * 0.56),
-        int(h * 0.43),
-        int(w * 0.79),
-        int(h * 0.62),
+        int(w * 0.55),
+        int(h * 0.42),
+        int(w * 0.80),
+        int(h * 0.63),
+    )
+
+    total_box = (
+        int(w * 0.45),
+        int(h * 0.63),
+        int(w * 0.78),
+        int(h * 0.83),
     )
 
     wl_txt, ganhos = ocr_crop_value(img, wl_box)
     rake_txt, rake = ocr_crop_value(img, rake_box)
+    total_txt, total_imagem = ocr_crop_value(img, total_box)
 
-    # Fallback por texto, caso algum recorte falhe
-    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    text = (
+        ocr_image(img, psm=6)
+        + "\n"
+        + ocr_image(img, psm=11)
+    )
 
-    if ganhos == 0.0 or rake == 0.0:
-        for line in text.splitlines():
-            if "SUPREMA" in line.upper():
-                vals = extract_all_money(line)
-                if len(vals) >= 2:
-                    ganhos = vals[0]   # W/L
-                    rake = vals[1]     # RAKE
-                break
+    # cálculo esperado
+    total_calculado = ganhos + (rake * 0.65)
+
+    # tolerância de diferença
+    diferenca = abs(total_calculado - total_imagem)
+
+    leitura_valida = diferenca <= 3.0
+
+    # fallback textual caso falhe
+    if not leitura_valida:
+
+        vals = extract_all_money(text)
+
+        # tenta achar padrão:
+        # W/L | RAKE | RB | TOTAL
+        if len(vals) >= 4:
+
+            ganhos2 = vals[0]
+            rake2 = vals[1]
+            total2 = vals[3]
+
+            total_calc2 = ganhos2 + (rake2 * 0.65)
+
+            if abs(total_calc2 - total2) <= 3.0:
+                ganhos = ganhos2
+                rake = rake2
+                total_imagem = total2
+                leitura_valida = True
 
     return {
         "agente": "SUPREMA | Agents",
         "ganhos": ganhos,
         "rake": rake,
         "rb_percentual": 65.0,
-        "ocr_text": text + "\n\nOCR W/L:\n" + wl_txt + "\n\nOCR RAKE:\n" + rake_txt,
+        "total_imagem": total_imagem,
+        "total_calculado": ganhos + (rake * 0.65),
+        "leitura_valida": leitura_valida,
+        "ocr_text": (
+            text
+            + "\n\nOCR W/L:\n" + wl_txt
+            + "\n\nOCR RAKE:\n" + rake_txt
+            + "\n\nOCR TOTAL:\n" + total_txt
+        ),
     }
 
 
@@ -932,6 +970,14 @@ def page_oscar():
         )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
+
+if not dados["leitura_valida"]:
+    st.error(
+        f"Leitura inválida. "
+        f"Total calculado: {fmt_brl(dados['total_calculado'])} | "
+        f"Total imagem: {fmt_brl(dados['total_imagem'])}"
+    )
+    return
 
 def page_alex():
     st.subheader("Alex")
