@@ -971,13 +971,7 @@ def page_oscar():
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
 
-if not dados["leitura_valida"]:
-    st.error(
-        f"Leitura inválida. "
-        f"Total calculado: {fmt_brl(dados['total_calculado'])} | "
-        f"Total imagem: {fmt_brl(dados['total_imagem'])}"
-    )
-    return
+
 
 def page_alex():
     st.subheader("Alex")
