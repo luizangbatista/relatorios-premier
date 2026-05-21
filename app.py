@@ -68,7 +68,7 @@ MAPA_IDS_PDF = {
     "2733985": {"cliente": "Oscar", "rb": 65.0},
     "13489882": {"cliente": "Oscar", "rb": 65.0},
     "3891202":{"cliente": "Oscar", "rb": 65.0},
-}
+    "4085350":{"cliente": "Oscar", "rb": 65.0},
 
 # =========================
 # CORES / LAYOUT
