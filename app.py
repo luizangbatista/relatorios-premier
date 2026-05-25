@@ -552,55 +552,64 @@ def process_demetra_excel(uploaded_file):
     return df[mask].copy()
 
 def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
+    """
+    Novo formato da tela Dados do Superagente / Killuminatti.
+
+    Campos corretos:
+    - Taxa = rake
+    - Ganhos = ganhos
+    - Retorno de taxa = Taxa * 75%  (usado só para validar/reconstruir o rake)
+    - Ganhos + Retorno = Ganhos + Retorno de taxa (usado só para validar/reconstruir ganhos)
+
+    Importante: o fechamento continua usando RB_DEMETRA_IMAGEM no cálculo final.
+    """
     w, h = img.size
 
-    taxa_box = (int(w * 0.03), int(h * 0.55), int(w * 0.40), int(h * 0.72))
-    ganhos_box = (int(w * 0.65), int(h * 0.55), int(w * 0.98), int(h * 0.72))
-    retorno_box = (int(w * 0.36), int(h * 0.74), int(w * 0.66), int(h * 0.92))
+    # Recortes do formato novo. Foram deixados mais largos para não cortar o primeiro dígito.
+    taxa_box = (int(w * 0.02), int(h * 0.54), int(w * 0.40), int(h * 0.72))
+    ganhos_box = (int(w * 0.64), int(h * 0.54), int(w * 0.99), int(h * 0.72))
+    retorno_box = (int(w * 0.35), int(h * 0.73), int(w * 0.67), int(h * 0.93))
+    total_box = (int(w * 0.66), int(h * 0.73), int(w * 0.99), int(h * 0.93))
 
-    taxa_crop = img.crop(taxa_box).resize(
-        ((taxa_box[2] - taxa_box[0]) * 4, (taxa_box[3] - taxa_box[1]) * 4)
-    )
+    def crop_ocr_money(box):
+        crop = img.crop(box)
+        crop = crop.resize((crop.width * 4, crop.height * 4))
+        txt = (
+            ocr_image(crop, psm=6)
+            + "\n"
+            + ocr_image(crop, psm=7)
+            + "\n"
+            + ocr_image(crop, psm=11)
+        )
+        vals = extract_all_money_misto(txt)
+        return txt, vals
 
-    ganhos_crop = img.crop(ganhos_box).resize(
-        ((ganhos_box[2] - ganhos_box[0]) * 4, (ganhos_box[3] - ganhos_box[1]) * 4)
-    )
-
-    retorno_crop = img.crop(retorno_box).resize(
-        ((retorno_box[2] - retorno_box[0]) * 4, (retorno_box[3] - retorno_box[1]) * 4)
-    )
-
-    taxa_txt = (
-        ocr_image(taxa_crop, psm=6) + "\n" +
-        ocr_image(taxa_crop, psm=7) + "\n" +
-        ocr_image(taxa_crop, psm=11)
-    )
-
-    ganhos_txt = (
-        ocr_image(ganhos_crop, psm=6) + "\n" +
-        ocr_image(ganhos_crop, psm=7) + "\n" +
-        ocr_image(ganhos_crop, psm=11)
-    )
-
-    retorno_txt = (
-        ocr_image(retorno_crop, psm=6) + "\n" +
-        ocr_image(retorno_crop, psm=7) + "\n" +
-        ocr_image(retorno_crop, psm=11)
-    )
-
-    taxa_vals = extract_all_money_misto(taxa_txt)
-    ganhos_vals = extract_all_money_misto(ganhos_txt)
-    retorno_vals = extract_all_money_misto(retorno_txt)
+    taxa_txt, taxa_vals = crop_ocr_money(taxa_box)
+    ganhos_txt, ganhos_vals = crop_ocr_money(ganhos_box)
+    retorno_txt, retorno_vals = crop_ocr_money(retorno_box)
+    total_txt, total_vals = crop_ocr_money(total_box)
 
     rake = taxa_vals[0] if taxa_vals else 0.0
     ganhos = ganhos_vals[0] if ganhos_vals else 0.0
     retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
+    total_tela = total_vals[0] if total_vals else 0.0
 
+    # Valida/reconstrói o rake pelo retorno de taxa: retorno = taxa * 75%.
     if retorno_taxa > 0:
-        taxa_por_retorno = retorno_taxa / 0.75
-
+        rake_por_retorno = retorno_taxa / 0.75
         if rake == 0 or abs((rake * 0.75) - retorno_taxa) > 10:
-            rake = taxa_por_retorno
+            rake = rake_por_retorno
+
+    # Valida/reconstrói os ganhos pelo bloco "Ganhos + Retorno de taxa".
+    # Ex.: 12.571,38 - 4.093,08 = 8.478,30.
+    if total_tela > 0 and retorno_taxa > 0:
+        ganhos_por_total = total_tela - retorno_taxa
+        if ganhos == 0 or abs((ganhos + retorno_taxa) - total_tela) > 10:
+            ganhos = ganhos_por_total
+
+    # Proteção específica contra OCR que transforma 8,478.3 em 8.47.
+    if ganhos > 0 and ganhos < 100 and total_tela > 100 and retorno_taxa > 100:
+        ganhos = total_tela - retorno_taxa
 
     text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
 
@@ -614,11 +623,14 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
             + "\n\nOCR TAXA:\n" + taxa_txt
             + "\n\nOCR GANHOS:\n" + ganhos_txt
             + "\n\nOCR RETORNO:\n" + retorno_txt
-            + f"\n\nGANHOS FINAL: {ganhos}"
+            + "\n\nOCR GANHOS + RETORNO:\n" + total_txt
+            + f"\n\nGANHOS FINAL VALIDADO: {ganhos}"
             + f"\nRAKE FINAL VALIDADO: {rake}"
+            + f"\nRETORNO DE TAXA LIDO: {retorno_taxa}"
+            + f"\nGANHOS + RETORNO LIDO: {total_tela}"
         ),
     }
-    
+
 def detect_demetra_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("KILLUMINATTI" in text or "SUPER AGENTE" in text) and ("RAKE" in text or "GANHOS" in text)
