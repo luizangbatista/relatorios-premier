@@ -575,9 +575,52 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
         int(h * 0.92),
     )
 
-    taxa_txt, rake = ocr_crop_value(img, taxa_box)
-    ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
-    retorno_txt, retorno_taxa = ocr_crop_value(img, retorno_box)
+    taxa_crop = img.crop(taxa_box).resize(
+    ((taxa_box[2] - taxa_box[0]) * 4,
+     (taxa_box[3] - taxa_box[1]) * 4)
+)
+
+ganhos_crop = img.crop(ganhos_box).resize(
+    ((ganhos_box[2] - ganhos_box[0]) * 4,
+     (ganhos_box[3] - ganhos_box[1]) * 4)
+)
+
+retorno_crop = img.crop(retorno_box).resize(
+    ((retorno_box[2] - retorno_box[0]) * 4,
+     (retorno_box[3] - retorno_box[1]) * 4)
+)
+
+taxa_txt = (
+    ocr_image(taxa_crop, psm=6)
+    + "\n"
+    + ocr_image(taxa_crop, psm=7)
+    + "\n"
+    + ocr_image(taxa_crop, psm=11)
+)
+
+ganhos_txt = (
+    ocr_image(ganhos_crop, psm=6)
+    + "\n"
+    + ocr_image(ganhos_crop, psm=7)
+    + "\n"
+    + ocr_image(ganhos_crop, psm=11)
+)
+
+retorno_txt = (
+    ocr_image(retorno_crop, psm=6)
+    + "\n"
+    + ocr_image(retorno_crop, psm=7)
+    + "\n"
+    + ocr_image(retorno_crop, psm=11)
+)
+
+taxa_vals = extract_all_money_misto(taxa_txt)
+ganhos_vals = extract_all_money_misto(ganhos_txt)
+retorno_vals = extract_all_money_misto(retorno_txt)
+
+rake = taxa_vals[0] if taxa_vals else 0.0
+ganhos = ganhos_vals[0] if ganhos_vals else 0.0
+retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
 
     # validação: retorno de taxa = taxa * 0.75
     # se a taxa lida não bater, tenta reconstruir pela leitura do retorno
