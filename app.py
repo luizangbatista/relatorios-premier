@@ -558,44 +558,39 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
     w, h = img.size
 
     taxa_box = (
-        int(w * 0.04),
-        int(h * 0.56),
-        int(w * 0.36),
-        int(h * 0.70),
+        int(w * 0.03),
+        int(h * 0.55),
+        int(w * 0.40),
+        int(h * 0.72),
     )
 
     ganhos_box = (
-        int(w * 0.68),
-        int(h * 0.56),
+        int(w * 0.65),
+        int(h * 0.55),
         int(w * 0.98),
-        int(h * 0.70),
+        int(h * 0.72),
     )
 
-    taxa_crop = img.crop(taxa_box).resize(
-        ((taxa_box[2] - taxa_box[0]) * 4, (taxa_box[3] - taxa_box[1]) * 4)
+    retorno_box = (
+        int(w * 0.36),
+        int(h * 0.74),
+        int(w * 0.66),
+        int(h * 0.92),
     )
 
-    ganhos_crop = img.crop(ganhos_box).resize(
-        ((ganhos_box[2] - ganhos_box[0]) * 4, (ganhos_box[3] - ganhos_box[1]) * 4)
-    )
+    taxa_txt, rake = ocr_crop_value(img, taxa_box)
+    ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
+    retorno_txt, retorno_taxa = ocr_crop_value(img, retorno_box)
 
-    taxa_txt = (
-        ocr_image(taxa_crop, psm=6) + "\n" +
-        ocr_image(taxa_crop, psm=7) + "\n" +
-        ocr_image(taxa_crop, psm=11)
-    )
+    # validação: retorno de taxa = taxa * 0.75
+    # se a taxa lida não bater, tenta reconstruir pela leitura do retorno
+    if retorno_taxa > 0:
+        taxa_por_retorno = retorno_taxa / 0.75
 
-    ganhos_txt = (
-        ocr_image(ganhos_crop, psm=6) + "\n" +
-        ocr_image(ganhos_crop, psm=7) + "\n" +
-        ocr_image(ganhos_crop, psm=11)
-    )
+        if rake == 0 or abs((rake * 0.75) - retorno_taxa) > 10:
+            rake = taxa_por_retorno
 
-    taxa_vals = extract_all_money_misto(taxa_txt)
-    ganhos_vals = extract_all_money_misto(ganhos_txt)
-
-    rake = taxa_vals[0] if taxa_vals else 0.0
-    ganhos = ganhos_vals[0] if ganhos_vals else 0.0
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
 
     return {
         "agente": "Killuminatti",
@@ -603,8 +598,11 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
         "rake": rake,
         "rb_percentual": RB_DEMETRA_IMAGEM,
         "ocr_text": (
-            "OCR TAXA:\n" + taxa_txt +
-            "\n\nOCR GANHOS:\n" + ganhos_txt
+            text
+            + "\n\nOCR TAXA:\n" + taxa_txt
+            + "\n\nOCR GANHOS:\n" + ganhos_txt
+            + "\n\nOCR RETORNO:\n" + retorno_txt
+            + f"\n\nRAKE FINAL VALIDADO: {rake}"
         ),
     }
     
