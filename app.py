@@ -123,27 +123,39 @@ def parse_money(value) -> float:
     text = text.replace("R$", "").replace(" ", "")
     text = text.replace("—", "-").replace("–", "-").replace("−", "-")
     text = text.replace("(", "").replace(")", "")
+    text = re.sub(r"[^0-9,.\-]", "", text)
 
-    if "," in text and "." in text:
-        if text.rfind(",") > text.rfind("."):
-            text = text.replace(".", "").replace(",", ".")
-        else:
-            text = text.replace(",", "")
-    elif "," in text:
-        text = text.replace(".", "").replace(",", ".")
-
-    if text.count(".") > 1:
-        parts = text.split(".")
-        text = "".join(parts[:-1]) + "." + parts[-1]
-
-    text = re.sub(r"[^0-9.\-]", "", text)
     if text in {"", "-", ".", "-."}:
         return 0.0
 
-    try:
+    # Caso OCR leia padrão americano: 8,478.3 ou 8,478.30
+    if re.match(r"^-?\d{1,3}(,\d{3})+\.\d{1,2}$", text):
+        text = text.replace(",", "")
         return float(text)
-    except Exception:
-        return 0.0
+
+    # Caso brasileiro: 8.478,30
+    if re.match(r"^-?\d{1,3}(\.\d{3})+,\d{1,2}$", text):
+        text = text.replace(".", "").replace(",", ".")
+        return float(text)
+
+    # Caso decimal com vírgula: 8478,30
+    if "," in text and "." not in text:
+        text = text.replace(",", ".")
+        return float(text)
+
+    # Caso decimal com ponto: 8478.30
+    if "." in text and "," not in text:
+        return float(text)
+
+    # Caso tenha os dois, decide pelo último separador
+    if "," in text and "." in text:
+        if text.rfind(".") > text.rfind(","):
+            text = text.replace(",", "")
+        else:
+            text = text.replace(".", "").replace(",", ".")
+        return float(text)
+
+    return float(text)
 
 
 def to_png_bytes(img: Image.Image) -> bytes:
