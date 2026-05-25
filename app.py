@@ -505,7 +505,46 @@ def process_demetra_excel(uploaded_file):
     mask = (df["id_conta"] == ID_PLANILHA_DEMETRA) & (df["origem"] == ORIGEM_PLANILHA_DEMETRA)
     return df[mask].copy()
 
+def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
+    """
+    Novo formato Killuminatti:
+    - Taxa = rake
+    - Ganhos = ganhos
+    - ignora retorno de taxa, porcentagem e total da tela
+    """
 
+    w, h = img.size
+
+    taxa_box = (
+        int(w * 0.06),
+        int(h * 0.58),
+        int(w * 0.34),
+        int(h * 0.72),
+    )
+
+    ganhos_box = (
+        int(w * 0.66),
+        int(h * 0.58),
+        int(w * 0.96),
+        int(h * 0.72),
+    )
+
+    taxa_txt, rake = ocr_crop_value(img, taxa_box)
+    ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
+
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+
+    return {
+        "agente": "Killuminatti",
+        "ganhos": ganhos,
+        "rake": rake,
+        "rb_percentual": RB_DEMETRA_IMAGEM,
+        "ocr_text": (
+            text
+            + "\n\nOCR TAXA:\n" + taxa_txt
+            + "\n\nOCR GANHOS:\n" + ganhos_txt
+        ),
+    }
 def detect_demetra_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("KILLUMINATTI" in text or "SUPER AGENTE" in text) and ("RAKE" in text or "GANHOS" in text)
@@ -847,6 +886,10 @@ def page_demetra():
     st.subheader("Demetra")
     periodo = st.text_input("Período do fechamento", key="periodo_demetra", placeholder="06/04/2026 a 12/04/2026")
     planilha = st.file_uploader("Envie a planilha 2101...", type=["xlsx", "xls"], key="demetra_xlsx")
+    imagem_killuminatti_novo = st.file_uploader(
+    "Envie a imagem do Killuminatti - novo formato",
+    type=["png", "jpg", "jpeg", "webp"],
+    key="demetra_killuminatti_novo_img")
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
     imagem = st.file_uploader("Envie a imagem do Killuminatti", type=["png", "jpg", "jpeg", "webp"], key="demetra_img")
 
@@ -887,9 +930,37 @@ def page_demetra():
                     "_REBATE": rebate,
                     "_TOTAL_FINAL": total_final,
                 })
+
+        
         else:
             st.warning("Não identifiquei a imagem do Demetra com segurança.")
+    if imagem_killuminatti_novo is not None:
+        img = Image.open(imagem_killuminatti_novo)
+        dados = extract_demetra_killuminatti_novo(img)
 
+        with st.expander("Diagnóstico OCR - Killuminatti novo formato", expanded=False):
+            st.code(dados["ocr_text"])
+
+        if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
+            st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem nova do Killuminatti.")
+        else:
+            total_base, rebate, total_final = calc_row(
+                dados["ganhos"],
+                dados["rake"],
+                dados["rb_percentual"],
+                REBATE_DEMETRA
+            )
+
+            rows.append({
+                "AGENTE": dados["agente"],
+                "GANHOS": dados["ganhos"],
+                "RAKE": dados["rake"],
+                "RB": f"{int(dados['rb_percentual'])}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
+    
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
             st.warning("Envie a planilha, o PDF e/ou a imagem do Demetra.")
