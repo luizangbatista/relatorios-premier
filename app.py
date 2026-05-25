@@ -624,7 +624,8 @@ retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
 
     # validação: retorno de taxa = taxa * 0.75
     # se a taxa lida não bater, tenta reconstruir pela leitura do retorno
-    if retorno_taxa > 0:
+        
+        if retorno_taxa > 0:
         taxa_por_retorno = retorno_taxa / 0.75
 
         if rake == 0 or abs((rake * 0.75) - retorno_taxa) > 10:
