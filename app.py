@@ -157,6 +157,43 @@ def parse_money(value) -> float:
 
     return float(text)
 
+def parse_money_misto(text: str) -> float:
+    text = str(text).strip()
+    text = text.replace("R$", "").replace(" ", "")
+    text = text.replace("—", "-").replace("–", "-").replace("−", "-")
+    text = re.sub(r"[^0-9,.\-]", "", text)
+
+    if not text or text in {"-", ".", ","}:
+        return 0.0
+
+    # padrão americano com milhar: 8,478.3 / 5,457.45
+    if re.match(r"^-?\d{1,3}(,\d{3})+\.\d{1,2}$", text):
+        return float(text.replace(",", ""))
+
+    # padrão brasileiro com milhar: 8.478,3 / 5.457,45
+    if re.match(r"^-?\d{1,3}(\.\d{3})+,\d{1,2}$", text):
+        return float(text.replace(".", "").replace(",", "."))
+
+    # se tiver vírgula e ponto, o último separador é decimal
+    if "," in text and "." in text:
+        if text.rfind(".") > text.rfind(","):
+            return float(text.replace(",", ""))
+        else:
+            return float(text.replace(".", "").replace(",", "."))
+
+    # só vírgula decimal
+    if "," in text:
+        return float(text.replace(",", "."))
+
+    return float(text)
+
+
+def extract_all_money_misto(text: str):
+    matches = re.findall(
+        r"-?\d{1,3}(?:[,.]\d{3})+[,.]\d{1,2}|-?\d+[,.]\d{1,2}",
+        text
+    )
+    return [parse_money_misto(m) for m in matches]
 
 def to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
@@ -518,33 +555,47 @@ def process_demetra_excel(uploaded_file):
     return df[mask].copy()
 
 def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
-    """
-    Novo formato Killuminatti:
-    - Taxa = rake
-    - Ganhos = ganhos
-    - ignora retorno de taxa, porcentagem e total da tela
-    """
-
     w, h = img.size
 
     taxa_box = (
-        int(w * 0.06),
-        int(h * 0.58),
-        int(w * 0.34),
-        int(h * 0.72),
+        int(w * 0.04),
+        int(h * 0.56),
+        int(w * 0.36),
+        int(h * 0.70),
     )
 
     ganhos_box = (
-        int(w * 0.66),
-        int(h * 0.58),
-        int(w * 0.96),
-        int(h * 0.72),
+        int(w * 0.68),
+        int(h * 0.56),
+        int(w * 0.98),
+        int(h * 0.70),
     )
 
-    taxa_txt, rake = ocr_crop_value(img, taxa_box)
-    ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
+    taxa_crop = img.crop(taxa_box).resize(
+        ((taxa_box[2] - taxa_box[0]) * 4, (taxa_box[3] - taxa_box[1]) * 4)
+    )
 
-    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    ganhos_crop = img.crop(ganhos_box).resize(
+        ((ganhos_box[2] - ganhos_box[0]) * 4, (ganhos_box[3] - ganhos_box[1]) * 4)
+    )
+
+    taxa_txt = (
+        ocr_image(taxa_crop, psm=6) + "\n" +
+        ocr_image(taxa_crop, psm=7) + "\n" +
+        ocr_image(taxa_crop, psm=11)
+    )
+
+    ganhos_txt = (
+        ocr_image(ganhos_crop, psm=6) + "\n" +
+        ocr_image(ganhos_crop, psm=7) + "\n" +
+        ocr_image(ganhos_crop, psm=11)
+    )
+
+    taxa_vals = extract_all_money_misto(taxa_txt)
+    ganhos_vals = extract_all_money_misto(ganhos_txt)
+
+    rake = taxa_vals[0] if taxa_vals else 0.0
+    ganhos = ganhos_vals[0] if ganhos_vals else 0.0
 
     return {
         "agente": "Killuminatti",
@@ -552,11 +603,11 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
         "rake": rake,
         "rb_percentual": RB_DEMETRA_IMAGEM,
         "ocr_text": (
-            text
-            + "\n\nOCR TAXA:\n" + taxa_txt
-            + "\n\nOCR GANHOS:\n" + ganhos_txt
+            "OCR TAXA:\n" + taxa_txt +
+            "\n\nOCR GANHOS:\n" + ganhos_txt
         ),
     }
+    
 def detect_demetra_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("KILLUMINATTI" in text or "SUPER AGENTE" in text) and ("RAKE" in text or "GANHOS" in text)
