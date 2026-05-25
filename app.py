@@ -554,77 +554,48 @@ def process_demetra_excel(uploaded_file):
 def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
     w, h = img.size
 
-    taxa_box = (
-        int(w * 0.03),
-        int(h * 0.55),
-        int(w * 0.40),
-        int(h * 0.72),
-    )
-
-    ganhos_box = (
-        int(w * 0.65),
-        int(h * 0.55),
-        int(w * 0.98),
-        int(h * 0.72),
-    )
-
-    retorno_box = (
-        int(w * 0.36),
-        int(h * 0.74),
-        int(w * 0.66),
-        int(h * 0.92),
-    )
+    taxa_box = (int(w * 0.03), int(h * 0.55), int(w * 0.40), int(h * 0.72))
+    ganhos_box = (int(w * 0.65), int(h * 0.55), int(w * 0.98), int(h * 0.72))
+    retorno_box = (int(w * 0.36), int(h * 0.74), int(w * 0.66), int(h * 0.92))
 
     taxa_crop = img.crop(taxa_box).resize(
-    ((taxa_box[2] - taxa_box[0]) * 4,
-     (taxa_box[3] - taxa_box[1]) * 4)
-)
+        ((taxa_box[2] - taxa_box[0]) * 4, (taxa_box[3] - taxa_box[1]) * 4)
+    )
 
-ganhos_crop = img.crop(ganhos_box).resize(
-    ((ganhos_box[2] - ganhos_box[0]) * 4,
-     (ganhos_box[3] - ganhos_box[1]) * 4)
-)
+    ganhos_crop = img.crop(ganhos_box).resize(
+        ((ganhos_box[2] - ganhos_box[0]) * 4, (ganhos_box[3] - ganhos_box[1]) * 4)
+    )
 
-retorno_crop = img.crop(retorno_box).resize(
-    ((retorno_box[2] - retorno_box[0]) * 4,
-     (retorno_box[3] - retorno_box[1]) * 4)
-)
+    retorno_crop = img.crop(retorno_box).resize(
+        ((retorno_box[2] - retorno_box[0]) * 4, (retorno_box[3] - retorno_box[1]) * 4)
+    )
 
-taxa_txt = (
-    ocr_image(taxa_crop, psm=6)
-    + "\n"
-    + ocr_image(taxa_crop, psm=7)
-    + "\n"
-    + ocr_image(taxa_crop, psm=11)
-)
+    taxa_txt = (
+        ocr_image(taxa_crop, psm=6) + "\n" +
+        ocr_image(taxa_crop, psm=7) + "\n" +
+        ocr_image(taxa_crop, psm=11)
+    )
 
-ganhos_txt = (
-    ocr_image(ganhos_crop, psm=6)
-    + "\n"
-    + ocr_image(ganhos_crop, psm=7)
-    + "\n"
-    + ocr_image(ganhos_crop, psm=11)
-)
+    ganhos_txt = (
+        ocr_image(ganhos_crop, psm=6) + "\n" +
+        ocr_image(ganhos_crop, psm=7) + "\n" +
+        ocr_image(ganhos_crop, psm=11)
+    )
 
-retorno_txt = (
-    ocr_image(retorno_crop, psm=6)
-    + "\n"
-    + ocr_image(retorno_crop, psm=7)
-    + "\n"
-    + ocr_image(retorno_crop, psm=11)
-)
+    retorno_txt = (
+        ocr_image(retorno_crop, psm=6) + "\n" +
+        ocr_image(retorno_crop, psm=7) + "\n" +
+        ocr_image(retorno_crop, psm=11)
+    )
 
-taxa_vals = extract_all_money_misto(taxa_txt)
-ganhos_vals = extract_all_money_misto(ganhos_txt)
-retorno_vals = extract_all_money_misto(retorno_txt)
+    taxa_vals = extract_all_money_misto(taxa_txt)
+    ganhos_vals = extract_all_money_misto(ganhos_txt)
+    retorno_vals = extract_all_money_misto(retorno_txt)
 
-rake = taxa_vals[0] if taxa_vals else 0.0
-ganhos = ganhos_vals[0] if ganhos_vals else 0.0
-retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
+    rake = taxa_vals[0] if taxa_vals else 0.0
+    ganhos = ganhos_vals[0] if ganhos_vals else 0.0
+    retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
 
-    # validação: retorno de taxa = taxa * 0.75
-    # se a taxa lida não bater, tenta reconstruir pela leitura do retorno
-        
     if retorno_taxa > 0:
         taxa_por_retorno = retorno_taxa / 0.75
 
@@ -643,7 +614,8 @@ retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
             + "\n\nOCR TAXA:\n" + taxa_txt
             + "\n\nOCR GANHOS:\n" + ganhos_txt
             + "\n\nOCR RETORNO:\n" + retorno_txt
-            + f"\n\nRAKE FINAL VALIDADO: {rake}"
+            + f"\n\nGANHOS FINAL: {ganhos}"
+            + f"\nRAKE FINAL VALIDADO: {rake}"
         ),
     }
     
