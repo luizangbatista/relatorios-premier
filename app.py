@@ -188,12 +188,32 @@ def parse_money_misto(text: str) -> float:
     return float(text)
 
 
-def extract_all_money_misto(text: str):
-    matches = re.findall(
-        r"-?\d{1,3}(?:[,.]\d{3})+[,.]\d{1,2}|-?\d+[,.]\d{1,2}",
-        text
-    )
-    return [parse_money_misto(m) for m in matches]
+def parse_money_misto(text: str) -> float:
+    text = str(text).strip()
+    text = text.replace("R$", "").replace(" ", "")
+    text = text.replace("—", "-").replace("–", "-").replace("−", "-")
+    text = re.sub(r"[^0-9,.\-]", "", text)
+
+    if not text or text in {"-", ".", ","}:
+        return 0.0
+
+    # americano: 8,478.3 / 8,478.30 / 5,457.45
+    if re.match(r"^-?\d{1,3}(,\d{3})+\.\d{1,2}$", text):
+        return float(text.replace(",", ""))
+
+    # brasileiro: 8.478,3 / 8.478,30 / 5.457,45
+    if re.match(r"^-?\d{1,3}(\.\d{3})+,\d{1,2}$", text):
+        return float(text.replace(".", "").replace(",", "."))
+
+    if "," in text and "." in text:
+        if text.rfind(".") > text.rfind(","):
+            return float(text.replace(",", ""))
+        return float(text.replace(".", "").replace(",", "."))
+
+    if "," in text:
+        return float(text.replace(",", "."))
+
+    return float(text)
 
 def to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
