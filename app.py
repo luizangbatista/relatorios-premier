@@ -1,16 +1,9 @@
 # ============================================================
-# FECHAMENTOS PREMIER - APP FINAL CORRIGIDO DEFINITIVO
-# ------------------------------------------------------------
-# Clientes:
-# - Harnefer: OCR em imagem
-# - Demetra: planilha + PDF
-# - Oscar: PDF
-# - Alex: PDF + imagem Casarica (2 formatos)
-#
-# CORREÇÃO DEFINITIVA DO CASARICA NOVO:
-# - leitura por recorte obrigatório dos blocos "Taxa" e "Ganhos"
-# - ignora ID, %, "retorno de taxa" e outros números da tela
-# - só usa fallback textual no formato antigo (profit/loss)
+# FECHAMENTOS PREMIER - APP FINAL CORRIGIDO
+# Alteração solicitada:
+# - Oscar: TOTAL de cada agente = apenas rakeback
+#   TOTAL = RAKE * %RB
+#   Ganhos não entram no total do Oscar.
 # ============================================================
 
 import io
@@ -68,8 +61,8 @@ MAPA_IDS_PDF = {
     "13470981": {"cliente": "Oscar", "rb": 65.0},
     "2733985": {"cliente": "Oscar", "rb": 65.0},
     "13489882": {"cliente": "Oscar", "rb": 65.0},
-    "3891202":{"cliente": "Oscar", "rb": 65.0},
-    "4085350":{"cliente": "Oscar", "rb": 45.0},
+    "3891202": {"cliente": "Oscar", "rb": 65.0},
+    "4085350": {"cliente": "Oscar", "rb": 45.0},
 }
 
 # =========================
@@ -129,26 +122,21 @@ def parse_money(value) -> float:
     if text in {"", "-", ".", "-."}:
         return 0.0
 
-    # Caso OCR leia padrão americano: 8,478.3 ou 8,478.30
     if re.match(r"^-?\d{1,3}(,\d{3})+\.\d{1,2}$", text):
         text = text.replace(",", "")
         return float(text)
 
-    # Caso brasileiro: 8.478,30
     if re.match(r"^-?\d{1,3}(\.\d{3})+,\d{1,2}$", text):
         text = text.replace(".", "").replace(",", ".")
         return float(text)
 
-    # Caso decimal com vírgula: 8478,30
     if "," in text and "." not in text:
         text = text.replace(",", ".")
         return float(text)
 
-    # Caso decimal com ponto: 8478.30
     if "." in text and "," not in text:
         return float(text)
 
-    # Caso tenha os dois, decide pelo último separador
     if "," in text and "." in text:
         if text.rfind(".") > text.rfind(","):
             text = text.replace(",", "")
@@ -157,6 +145,7 @@ def parse_money(value) -> float:
         return float(text)
 
     return float(text)
+
 
 def parse_money_misto(text: str) -> float:
     text = str(text).strip()
@@ -167,11 +156,9 @@ def parse_money_misto(text: str) -> float:
     if not text or text in {"-", ".", ","}:
         return 0.0
 
-    # americano: 8,478.3 / 8,478.30 / 5,457.45
     if re.match(r"^-?\d{1,3}(,\d{3})+\.\d{1,2}$", text):
         return float(text.replace(",", ""))
 
-    # brasileiro: 8.478,3 / 8.478,30 / 5.457,45
     if re.match(r"^-?\d{1,3}(\.\d{3})+,\d{1,2}$", text):
         return float(text.replace(".", "").replace(",", "."))
 
@@ -189,9 +176,10 @@ def parse_money_misto(text: str) -> float:
 def extract_all_money_misto(text: str):
     matches = re.findall(
         r"-?\d{1,3}(?:[,.]\d{3})+[,.]\d{1,2}|-?\d+[,.]\d{1,2}",
-        text
+        text,
     )
     return [parse_money_misto(m) for m in matches]
+
 
 def to_png_bytes(img: Image.Image) -> bytes:
     buf = io.BytesIO()
@@ -281,7 +269,6 @@ def ocr_crop_value(img: Image.Image, box) -> tuple[str, float]:
     crop = img.crop(box)
     txt = ocr_image(crop, psm=6) + "\n" + ocr_image(crop, psm=11)
     vals = extract_all_money(txt)
-    # escolhe primeiro valor plausível
     for v in vals:
         if abs(v) < 100000:
             return txt, v
@@ -333,67 +320,33 @@ def detect_suprema_image(img: Image.Image) -> bool:
 def extract_suprema_values(img: Image.Image) -> dict:
     """
     Lê a imagem da SUPREMA:
-    - W/L = ganhos
+    - W/L = ganhos, apenas exibido
     - RAKE = rake
-    - valida pelo TOTAL da imagem
+    - TOTAL do Oscar = rake * 65%, sem somar ganhos
     """
-
     w, h = img.size
 
-    wl_box = (
-        int(w * 0.30),
-        int(h * 0.42),
-        int(w * 0.58),
-        int(h * 0.63),
-    )
-
-    rake_box = (
-        int(w * 0.55),
-        int(h * 0.42),
-        int(w * 0.80),
-        int(h * 0.63),
-    )
-
-    total_box = (
-        int(w * 0.45),
-        int(h * 0.63),
-        int(w * 0.78),
-        int(h * 0.83),
-    )
+    wl_box = (int(w * 0.30), int(h * 0.42), int(w * 0.58), int(h * 0.63))
+    rake_box = (int(w * 0.55), int(h * 0.42), int(w * 0.80), int(h * 0.63))
+    total_box = (int(w * 0.45), int(h * 0.63), int(w * 0.78), int(h * 0.83))
 
     wl_txt, ganhos = ocr_crop_value(img, wl_box)
     rake_txt, rake = ocr_crop_value(img, rake_box)
     total_txt, total_imagem = ocr_crop_value(img, total_box)
 
-    text = (
-        ocr_image(img, psm=6)
-        + "\n"
-        + ocr_image(img, psm=11)
-    )
+    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
 
-    # cálculo esperado
-    total_calculado = (rake * 0.65)
-
-    # tolerância de diferença
+    total_calculado = rake * 0.65
     diferenca = abs(total_calculado - total_imagem)
-
     leitura_valida = diferenca <= 3.0
 
-    # fallback textual caso falhe
     if not leitura_valida:
-
         vals = extract_all_money(text)
-
-        # tenta achar padrão:
-        # W/L | RAKE | RB | TOTAL
         if len(vals) >= 4:
-
             ganhos2 = vals[0]
             rake2 = vals[1]
             total2 = vals[3]
-
-            total_calc2 = (rake2 * 0.65)
-
+            total_calc2 = rake2 * 0.65
             if abs(total_calc2 - total2) <= 3.0:
                 ganhos = ganhos2
                 rake = rake2
@@ -406,7 +359,7 @@ def extract_suprema_values(img: Image.Image) -> dict:
         "rake": rake,
         "rb_percentual": 65.0,
         "total_imagem": total_imagem,
-        "total_calculado": (rake * 0.65),
+        "total_calculado": rake * 0.65,
         "leitura_valida": leitura_valida,
         "ocr_text": (
             text
@@ -440,7 +393,6 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
     text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
     text_upper = text.upper()
 
-    # FORMATO ANTIGO - ainda pode usar texto
     if "PROFIT" in text_upper and "LOSS" in text_upper and "RAKE" in text_upper:
         ganhos = extract_labeled_money(text, r"PROFIT\s*/\s*LOSS")
         rake70 = extract_labeled_money(text, r"RAKE\s*70%?")
@@ -467,33 +419,18 @@ def extract_alex_casarica_values(img: Image.Image) -> dict:
             "ocr_ganhos_crop": "",
         }
 
-    # FORMATO NOVO - recorte obrigatório, sem fallback perigoso
     w, h = img.size
-
-    # Recortes mais estreitos para fugir do ID, 70% e campos inferiores
-    taxa_box = (
-        int(w * 0.06),
-        int(h * 0.48),
-        int(w * 0.34),
-        int(h * 0.68),
-    )
-    ganhos_box = (
-        int(w * 0.66),
-        int(h * 0.48),
-        int(w * 0.94),
-        int(h * 0.68),
-    )
+    taxa_box = (int(w * 0.06), int(h * 0.48), int(w * 0.34), int(h * 0.68))
+    ganhos_box = (int(w * 0.66), int(h * 0.48), int(w * 0.94), int(h * 0.68))
 
     taxa_txt, rake = ocr_crop_value(img, taxa_box)
     ganhos_txt, ganhos = ocr_crop_value(img, ganhos_box)
 
-    # Validação forte: não aceitar valores absurdos
     if abs(rake) > 50000:
         rake = 0.0
     if abs(ganhos) > 50000:
         ganhos = 0.0
 
-    # Se ambos falharem, não tenta leitura global perigosa
     if rake == 0.0 and ganhos == 0.0:
         return {
             "agente": "Gustavo | Casarica",
@@ -552,21 +489,10 @@ def process_demetra_excel(uploaded_file):
     mask = (df["id_conta"] == ID_PLANILHA_DEMETRA) & (df["origem"] == ORIGEM_PLANILHA_DEMETRA)
     return df[mask].copy()
 
+
 def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
-    """
-    Novo formato da tela Dados do Superagente / Killuminatti.
-
-    Campos corretos:
-    - Taxa = rake
-    - Ganhos = ganhos
-    - Retorno de taxa = Taxa * 75%  (usado só para validar/reconstruir o rake)
-    - Ganhos + Retorno = Ganhos + Retorno de taxa (usado só para validar/reconstruir ganhos)
-
-    Importante: o fechamento continua usando RB_DEMETRA_IMAGEM no cálculo final.
-    """
     w, h = img.size
 
-    # Recortes do formato novo. Foram deixados mais largos para não cortar o primeiro dígito.
     taxa_box = (int(w * 0.02), int(h * 0.54), int(w * 0.40), int(h * 0.72))
     ganhos_box = (int(w * 0.64), int(h * 0.54), int(w * 0.99), int(h * 0.72))
     retorno_box = (int(w * 0.35), int(h * 0.73), int(w * 0.67), int(h * 0.93))
@@ -575,13 +501,7 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
     def crop_ocr_money(box):
         crop = img.crop(box)
         crop = crop.resize((crop.width * 4, crop.height * 4))
-        txt = (
-            ocr_image(crop, psm=6)
-            + "\n"
-            + ocr_image(crop, psm=7)
-            + "\n"
-            + ocr_image(crop, psm=11)
-        )
+        txt = ocr_image(crop, psm=6) + "\n" + ocr_image(crop, psm=7) + "\n" + ocr_image(crop, psm=11)
         vals = extract_all_money_misto(txt)
         return txt, vals
 
@@ -595,20 +515,16 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
     retorno_taxa = retorno_vals[0] if retorno_vals else 0.0
     total_tela = total_vals[0] if total_vals else 0.0
 
-    # Valida/reconstrói o rake pelo retorno de taxa: retorno = taxa * 75%.
     if retorno_taxa > 0:
         rake_por_retorno = retorno_taxa / 0.75
         if rake == 0 or abs((rake * 0.75) - retorno_taxa) > 10:
             rake = rake_por_retorno
 
-    # Valida/reconstrói os ganhos pelo bloco "Ganhos + Retorno de taxa".
-    # Ex.: 12.571,38 - 4.093,08 = 8.478,30.
     if total_tela > 0 and retorno_taxa > 0:
         ganhos_por_total = total_tela - retorno_taxa
         if ganhos == 0 or abs((ganhos + retorno_taxa) - total_tela) > 10:
             ganhos = ganhos_por_total
 
-    # Proteção específica contra OCR que transforma 8,478.3 em 8.47.
     if ganhos > 0 and ganhos < 100 and total_tela > 100 and retorno_taxa > 100:
         ganhos = total_tela - retorno_taxa
 
@@ -632,17 +548,13 @@ def extract_demetra_killuminatti_novo(img: Image.Image) -> dict:
         ),
     }
 
+
 def detect_demetra_image(img: Image.Image) -> bool:
     text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
     return ("KILLUMINATTI" in text or "SUPER AGENTE" in text) and ("RAKE" in text or "GANHOS" in text)
 
 
 def extract_demetra_image_values(img: Image.Image) -> dict:
-    """Lê a imagem do Demetra: extrai RAKE total e GANHOS.
-
-    A porcentagem mostrada na imagem não é usada no cálculo do fechamento;
-    o app aplica RB_DEMETRA_IMAGEM sobre o rake total lido.
-    """
     text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
@@ -658,8 +570,6 @@ def extract_demetra_image_values(img: Image.Image) -> dict:
             ganhos = vals[2]
             break
 
-    # Fallback: no padrão da imagem, os primeiros valores monetários são:
-    # RAKE, -25%, GANHOS, RESULTADO, ADIANTAMENTO, TOTAL.
     if rake == 0.0 and ganhos == 0.0:
         vals = extract_all_money(text)
         if len(vals) >= 3:
@@ -718,6 +628,13 @@ def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual
     rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
     total_final = total_base + rebate
     return total_base, rebate, total_final
+
+
+def calc_oscar_row(ganhos: float, rake: float, rb_percentual: float):
+    """Oscar: o total do agente é somente o rakeback; ganhos não entram no cálculo."""
+    rb_valor = rake * (rb_percentual / 100.0)
+    total_base = rb_valor
+    return total_base, 0.0, total_base
 
 
 def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
@@ -826,7 +743,6 @@ def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.
 def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str, total_base_exibido: float | None = None) -> Image.Image:
     temp_img = Image.new("RGB", (10, 10), WHITE)
     temp_draw = ImageDraw.Draw(temp_img)
-    cell_font = get_font(FONT_CELL, bold=False)
     agent_font = get_font(FONT_AGENT, bold=False)
     line_h = measure(temp_draw, "Ag", agent_font)[1] + 4
     agente_col_width = 500 - 24
@@ -851,8 +767,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     status_font = get_font(FONT_STATUS, bold=True)
     status_value_font = get_font(FONT_STATUS_VALUE, bold=True)
 
-    # TOTAL azul: por padrão mantém o comportamento antigo.
-    # Quando informado, exibe o total base antes do ajuste.
     total_azul = total_geral if total_base_exibido is None else total_base_exibido
 
     tw, _ = measure(draw, titulo, title_font)
@@ -974,9 +888,10 @@ def page_demetra():
     periodo = st.text_input("Período do fechamento", key="periodo_demetra", placeholder="06/04/2026 a 12/04/2026")
     planilha = st.file_uploader("Envie a planilha 2101...", type=["xlsx", "xls"], key="demetra_xlsx")
     imagem_killuminatti_novo = st.file_uploader(
-    "Envie a imagem do Killuminatti - novo formato",
-    type=["png", "jpg", "jpeg", "webp"],
-    key="demetra_killuminatti_novo_img")
+        "Envie a imagem do Killuminatti - novo formato",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="demetra_killuminatti_novo_img",
+    )
     pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
     imagem = st.file_uploader("Envie a imagem do Killuminatti", type=["png", "jpg", "jpeg", "webp"], key="demetra_img")
 
@@ -1017,10 +932,9 @@ def page_demetra():
                     "_REBATE": rebate,
                     "_TOTAL_FINAL": total_final,
                 })
-
-        
         else:
             st.warning("Não identifiquei a imagem do Demetra com segurança.")
+
     if imagem_killuminatti_novo is not None:
         img = Image.open(imagem_killuminatti_novo)
         dados = extract_demetra_killuminatti_novo(img)
@@ -1031,13 +945,7 @@ def page_demetra():
         if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
             st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem nova do Killuminatti.")
         else:
-            total_base, rebate, total_final = calc_row(
-                dados["ganhos"],
-                dados["rake"],
-                dados["rb_percentual"],
-                REBATE_DEMETRA
-            )
-
+            total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_DEMETRA)
             rows.append({
                 "AGENTE": dados["agente"],
                 "GANHOS": dados["ganhos"],
@@ -1047,17 +955,12 @@ def page_demetra():
                 "_REBATE": rebate,
                 "_TOTAL_FINAL": total_final,
             })
-    
+
     if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
         if not rows:
             st.warning("Envie a planilha, o PDF e/ou a imagem do Demetra.")
             return
         detalhado = pd.DataFrame(rows)
-
-        # Na Demetra, o ajuste é aplicado uma única vez sobre o total base.
-        # TOTAL azul = soma dos totais das linhas, sem ajuste.
-        # Linha cinza = -5% do TOTAL azul, se o total for positivo.
-        # TOTAL amarelo = TOTAL azul + ajuste.
         total_base_geral = detalhado["TOTAL"].sum()
         rebate_total = total_base_geral * (REBATE_DEMETRA / 100.0) if total_base_geral > 0 else 0.0
         total_geral = total_base_geral + rebate_total
@@ -1085,8 +988,17 @@ def page_oscar():
     if pdf is not None:
         df_pdf = process_pdf_by_client(pdf, "Oscar")
         for _, row in df_pdf.iterrows():
-            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_OSCAR)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
+            # OSCAR: TOTAL = rake * %RB. Ganhos ficam só para exibição.
+            total_base, rebate, total_final = calc_oscar_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
+            rows.append({
+                "AGENTE": row["agente"],
+                "GANHOS": float(row["ganhos"]),
+                "RAKE": float(row["rake"]),
+                "RB": f"{int(float(row['rb_percentual']))}%",
+                "TOTAL": total_base,
+                "_REBATE": rebate,
+                "_TOTAL_FINAL": total_final,
+            })
 
     if imagem_suprema is not None:
         img = Image.open(imagem_suprema)
@@ -1097,7 +1009,8 @@ def page_oscar():
         if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
             st.warning("Não consegui ler os valores da SUPREMA com segurança nessa imagem.")
         else:
-            total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_OSCAR)
+            # OSCAR: TOTAL = rake * %RB. Ganhos ficam só para exibição.
+            total_base, rebate, total_final = calc_oscar_row(dados["ganhos"], dados["rake"], dados["rb_percentual"])
             rows.append({
                 "AGENTE": dados["agente"],
                 "GANHOS": dados["ganhos"],
@@ -1114,6 +1027,8 @@ def page_oscar():
             return
         detalhado = pd.DataFrame(rows)
 
+        # No Oscar, o total base é a soma apenas dos rakebacks das linhas.
+        # Ganhos não entram no cálculo.
         total_base_geral = detalhado["TOTAL"].sum()
         rebate_total = total_base_geral * (REBATE_OSCAR / 100.0) if total_base_geral > 0 else 0.0
         total_geral = total_base_geral + rebate_total
@@ -1129,7 +1044,6 @@ def page_oscar():
         )
         st.image(report, caption="Pronto para print", use_container_width=True)
         st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
-
 
 
 def page_alex():
@@ -1170,7 +1084,7 @@ def page_alex():
                 rows.append({
                     "AGENTE": dados["agente"],
                     "GANHOS": dados["ganhos"],
-                    "RAKE": dados["rake"]/0.7,
+                    "RAKE": dados["rake"] / 0.7,
                     "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
                     "TOTAL": dados["total_base"],
                     "_REBATE": dados["rebate"],
@@ -1183,20 +1097,16 @@ def page_alex():
         if not rows:
             st.warning("Envie o PDF e/ou a imagem do Casarica.")
             return
-        დეტ = pd.DataFrame(rows)
+        detalhado = pd.DataFrame(rows)
 
-        # No Alex, o ajuste é aplicado uma única vez sobre o total base.
-        # TOTAL azul = soma dos totais das linhas, sem ajuste.
-        # Linha cinza = -5% do TOTAL azul.
-        # TOTAL amarelo = TOTAL azul + ajuste.
-        total_base_geral = დეტ["TOTAL"].sum()
+        total_base_geral = detalhado["TOTAL"].sum()
         rebate_total = total_base_geral * (REBATE_ALEX_POSITIVO / 100.0)
         total_geral = total_base_geral + rebate_total
 
         report = generate_client_table_image(
             "ALEX",
             periodo.strip() or "-",
-            დეტ[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
+            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
             total_geral,
             rebate_total,
             "-5% total",
