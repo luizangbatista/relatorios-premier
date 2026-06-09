@@ -372,7 +372,7 @@ def extract_suprema_values(img: Image.Image) -> dict:
     )
 
     # cálculo esperado
-    total_calculado = ganhos + (rake * 0.65)
+    total_calculado = (rake * 0.65)
 
     # tolerância de diferença
     diferenca = abs(total_calculado - total_imagem)
@@ -392,7 +392,7 @@ def extract_suprema_values(img: Image.Image) -> dict:
             rake2 = vals[1]
             total2 = vals[3]
 
-            total_calc2 = ganhos2 + (rake2 * 0.65)
+            total_calc2 = (rake2 * 0.65)
 
             if abs(total_calc2 - total2) <= 3.0:
                 ganhos = ganhos2
@@ -406,7 +406,7 @@ def extract_suprema_values(img: Image.Image) -> dict:
         "rake": rake,
         "rb_percentual": 65.0,
         "total_imagem": total_imagem,
-        "total_calculado": ganhos + (rake * 0.65),
+        "total_calculado": (rake * 0.65),
         "leitura_valida": leitura_valida,
         "ocr_text": (
             text
