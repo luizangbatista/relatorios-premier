@@ -1,9 +1,15 @@
 # ============================================================
 # FECHAMENTOS PREMIER - APP FINAL CORRIGIDO
-# Alteração solicitada:
+# Alterações incluídas:
 # - Oscar: TOTAL de cada agente = apenas rakeback
 #   TOTAL = RAKE * %RB
 #   Ganhos não entram no total do Oscar.
+#
+# - Demetra / Killuminatti:
+#   leitura da tabela por colunas.
+#   Soma todos os valores da coluna RAKE.
+#   Soma todos os valores da coluna GANHOS.
+#   Ignora -25%, Resultado, Adiantamento e Total.
 # ============================================================
 
 import io
@@ -555,35 +561,94 @@ def detect_demetra_image(img: Image.Image) -> bool:
 
 
 def extract_demetra_image_values(img: Image.Image) -> dict:
-    text = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    """
+    Lê a imagem/tabela do Demetra no formato Killuminatti 25%.
 
-    agente = "Killuminatti"
-    rake = 0.0
-    ganhos = 0.0
+    Correção:
+    - soma a coluna RAKE de todas as linhas de agente;
+    - soma a coluna GANHOS de todas as linhas de agente;
+    - ignora as colunas -25%, Resultado e TOTAL;
+    - a linha ADIANTAMENTO pode aparecer como 0,00 e não altera a soma.
 
-    for line in lines:
-        upper = line.upper()
-        vals = extract_all_money(line)
-        if "KILLUMINATTI" in upper and len(vals) >= 3:
-            rake = vals[0]
-            ganhos = vals[2]
-            break
+    Exemplo esperado:
+    RAKE = 6751,75 + 23,05 = 6774,80
+    GANHOS = -2231,40 + 592,35 = -1639,05
+    """
+    text_global = ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)
+    w, h = img.size
 
+    def ocr_money_column(box, label):
+        crop = img.crop(box)
+        # aumenta o recorte para melhorar OCR de números pequenos
+        crop_big = crop.resize((crop.width * 4, crop.height * 4))
+        txt = (
+            ocr_image(crop_big, psm=6)
+            + "\n"
+            + ocr_image(crop_big, psm=7)
+            + "\n"
+            + ocr_image(crop_big, psm=11)
+        )
+        vals = extract_all_money_misto(txt)
+
+        # proteção: remove leituras absurdas que normalmente vêm de ruído/OCR
+        vals = [v for v in vals if abs(v) < 100000]
+
+        return txt, vals
+
+    # Recortes por coluna para a tabela "Killuminatti 25%".
+    # As proporções foram feitas para pegar somente as linhas de dados,
+    # sem cabeçalho e sem a faixa TOTAL no rodapé.
+    rake_box = (
+        int(w * 0.28),
+        int(h * 0.36),
+        int(w * 0.43),
+        int(h * 0.79),
+    )
+    ganhos_box = (
+        int(w * 0.56),
+        int(h * 0.36),
+        int(w * 0.72),
+        int(h * 0.79),
+    )
+
+    rake_txt, rake_vals = ocr_money_column(rake_box, "RAKE")
+    ganhos_txt, ganhos_vals = ocr_money_column(ganhos_box, "GANHOS")
+
+    rake = sum(rake_vals)
+    ganhos = sum(ganhos_vals)
+
+    # Fallback por linhas: usa somente linhas que pareçam ser agentes.
+    # Ignora cabeçalho, adiantamento, total e resultado final.
     if rake == 0.0 and ganhos == 0.0:
-        vals = extract_all_money(text)
-        if len(vals) >= 3:
-            rake = vals[0]
-            ganhos = vals[2]
+        linhas = [ln.strip() for ln in text_global.splitlines() if ln.strip()]
+        for line in linhas:
+            upper = line.upper()
+            if any(palavra in upper for palavra in ["SUPER", "AGENTE", "RAKE", "GANHOS", "RESULTADO", "ADIANTAMENTO", "TOTAL"]):
+                continue
+
+            vals = extract_all_money_misto(line)
+            if len(vals) >= 3:
+                # padrão da linha:
+                # agente | rake | -25% | ganhos | resultado
+                rake += vals[0]
+                ganhos += vals[2]
 
     return {
-        "agente": agente,
+        "agente": "Killuminatti",
         "ganhos": ganhos,
         "rake": rake,
         "rb_percentual": RB_DEMETRA_IMAGEM,
-        "ocr_text": text,
+        "ocr_text": (
+            text_global
+            + "\n\n=== LEITURA POR TABELA/COLUNAS ==="
+            + "\nOCR COLUNA RAKE:\n" + rake_txt
+            + "\nVALORES RAKE LIDOS: " + str(rake_vals)
+            + "\nSOMA RAKE: " + str(rake)
+            + "\n\nOCR COLUNA GANHOS:\n" + ganhos_txt
+            + "\nVALORES GANHOS LIDOS: " + str(ganhos_vals)
+            + "\nSOMA GANHOS: " + str(ganhos)
+        ),
     }
-
 
 # =========================
 # PDF
