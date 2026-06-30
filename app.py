@@ -669,19 +669,23 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
     for line in extract_pdf_lines(uploaded_file):
         if "R$" not in line:
             continue
-        id_match = re.search(r"\b(\d{6,9})\b", line)
+        id_match = re.search(r"\b(0|\d{6,9})\b", line)
         if not id_match:
             continue
-        id_agente = normalize_id(id_match.group(1))
+
+        id_agente =           normalize_id(id_match.group(1))
+
         money_matches = re.findall(r"R\$\s*-?\d[\d\.,]*", line)
         if len(money_matches) < 2:
             continue
+
         info = MAPA_IDS_PDF.get(id_agente)
-        if not info or info["cliente"] != cliente_alvo:
+        if not info or info["cliente"] !=         cliente_alvo:
             continue
-        ganhos = parse_money(money_matches[0])
+
+        ganhos =    parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
-        agente = re.sub(r"\s{2,}", " ", line.split(id_agente)[0].strip())
+        agente = re.sub(r"\s{2,}", " ",  line[:id_match.start()].strip())
         rows.append({"agente": agente, "ganhos": ganhos, "rake": rake, "rb_percentual": float(info["rb"])})
     return pd.DataFrame(rows)
 
