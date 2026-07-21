@@ -946,51 +946,95 @@ def _merge_close_positions(values: list[float], tolerance: float = 4.0) -> list[
 
 
 def _detect_table_grid(img: Image.Image) -> dict:
-    """Detecta automaticamente as linhas da grade da tabela na imagem inteira."""
-    if not CV2_OK:
-        return {"ok": False, "reason": "OpenCV indisponível."}
+    """Detecta a grade da tabela na imagem inteira sem exigir OpenCV.
 
-    rgb = np.array(img.convert("RGB"))
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    binary = cv2.threshold(gray, 185, 255, cv2.THRESH_BINARY_INV)[1]
+    Usa projeções de pixels escuros para localizar linhas horizontais e
+    verticais. Isso mantém a leitura dinâmica e evita depender de recortes
+    proporcionais ou da instalação do OpenCV.
+    """
+    try:
+        import numpy as _np
+    except Exception:
+        return {"ok": False, "reason": "NumPy indisponível para detectar a grade."}
+
+    gray = _np.array(ImageOps.autocontrast(img.convert("L")))
     height, width = gray.shape
 
-    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, width // 15), 1))
-    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(15, height // 8)))
-    horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
-    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
+    # Linhas da grade são escuras e longas. O limiar é deliberadamente
+    # tolerante para funcionar com capturas redimensionadas ou comprimidas.
+    dark = gray < 175
 
-    h_contours, _ = cv2.findContours(horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    v_contours, _ = cv2.findContours(vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    horizontal_score = dark.sum(axis=1)
+    horizontal_candidates = _np.where(horizontal_score >= width * 0.34)[0].tolist()
+    ys = _merge_close_positions(horizontal_candidates, tolerance=max(2.0, height * 0.006))
 
-    h_positions = []
-    h_segments = []
-    for contour in h_contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        if w >= width * 0.38 and h <= max(8, height * 0.025):
-            h_positions.append(y + h / 2)
-            h_segments.append((x, y, w, h))
+    # Remove linhas muito próximas das bordas e conserva a sequência mais
+    # coerente da região da tabela.
+    ys = [y for y in ys if int(height * 0.08) <= y <= int(height * 0.96)]
+    if len(ys) < 3:
+        # Segundo passe mais permissivo para linhas cinza/azuladas.
+        dark2 = gray < 205
+        score2 = dark2.sum(axis=1)
+        candidates2 = _np.where(score2 >= width * 0.48)[0].tolist()
+        ys = _merge_close_positions(candidates2, tolerance=max(2.0, height * 0.006))
+        ys = [y for y in ys if int(height * 0.08) <= y <= int(height * 0.96)]
 
-    v_positions = []
-    for contour in v_contours:
-        x, y, w, h = cv2.boundingRect(contour)
-        if h >= height * 0.30 and w <= max(8, width * 0.01):
-            v_positions.append(x + w / 2)
+    if len(ys) < 3:
+        return {
+            "ok": False,
+            "reason": f"Linhas horizontais insuficientes: {len(ys)}.",
+            "xs": [],
+            "ys": ys,
+        }
 
-    ys = _merge_close_positions(h_positions, tolerance=max(3.0, height * 0.008))
-    xs = _merge_close_positions(v_positions, tolerance=max(3.0, width * 0.004))
+    table_top = max(0, ys[0] - 2)
+    table_bottom = min(height, ys[-1] + 3)
+    table_h = max(1, table_bottom - table_top)
 
-    # A borda esquerda às vezes encosta no limite da imagem e não vira contorno vertical.
-    if h_segments:
-        table_left = min(seg[0] for seg in h_segments)
-        table_right = max(seg[0] + seg[2] for seg in h_segments)
-        if not xs or abs(xs[0] - table_left) > width * 0.03:
-            xs.insert(0, int(table_left))
-        if abs(xs[-1] - table_right) > width * 0.03:
-            xs.append(int(table_right))
+    vertical_score = dark[table_top:table_bottom, :].sum(axis=0)
+    vertical_candidates = _np.where(vertical_score >= table_h * 0.72)[0].tolist()
+    xs = _merge_close_positions(vertical_candidates, tolerance=max(2.0, width * 0.0035))
+
+    if len(xs) < 4:
+        dark2 = gray < 205
+        vertical_score2 = dark2[table_top:table_bottom, :].sum(axis=0)
+        candidates2 = _np.where(vertical_score2 >= table_h * 0.68)[0].tolist()
+        xs = _merge_close_positions(candidates2, tolerance=max(2.0, width * 0.0035))
+
+    # Estima bordas laterais pela extensão das linhas horizontais quando uma
+    # borda não foi reconhecida como linha vertical contínua.
+    row_band = dark[max(0, ys[0]-2):min(height, ys[-1]+3), :]
+    col_presence = row_band.sum(axis=0)
+    active = _np.where(col_presence > 0)[0]
+    if active.size:
+        left_edge = int(active.min())
+        right_edge = int(active.max())
+        if not xs or abs(xs[0] - left_edge) > width * 0.025:
+            xs.insert(0, left_edge)
+        if not xs or abs(xs[-1] - right_edge) > width * 0.025:
+            xs.append(right_edge)
 
     xs = sorted(set(max(0, min(width - 1, int(x))) for x in xs))
     ys = sorted(set(max(0, min(height - 1, int(y))) for y in ys))
+
+    # Elimina divisões espúrias muito estreitas.
+    min_col_w = max(8, int(width * 0.025))
+    filtered_xs = []
+    for x in xs:
+        if not filtered_xs or x - filtered_xs[-1] >= min_col_w:
+            filtered_xs.append(x)
+        else:
+            filtered_xs[-1] = int(round((filtered_xs[-1] + x) / 2))
+    xs = filtered_xs
+
+    min_row_h = max(5, int(height * 0.012))
+    filtered_ys = []
+    for y in ys:
+        if not filtered_ys or y - filtered_ys[-1] >= min_row_h:
+            filtered_ys.append(y)
+        else:
+            filtered_ys[-1] = int(round((filtered_ys[-1] + y) / 2))
+    ys = filtered_ys
 
     if len(xs) < 4 or len(ys) < 3:
         return {
@@ -1000,7 +1044,7 @@ def _detect_table_grid(img: Image.Image) -> dict:
             "ys": ys,
         }
 
-    return {"ok": True, "xs": xs, "ys": ys}
+    return {"ok": True, "xs": xs, "ys": ys, "method": "projecao_de_pixels"}
 
 
 def _ocr_cell_text(img: Image.Image, box: tuple[int, int, int, int], numeric: bool = False) -> str:
