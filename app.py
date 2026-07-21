@@ -934,12 +934,25 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
     total_base = total_geral if total_base_exibido is None else total_base_exibido
     summary = [("SUBTOTAL" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
     for idx,(label,value,bg,label_color) in enumerate(summary):
-        draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
-        label_end=xs[-2]
-        sw,_=measure(draw,label,total_font); draw.text((label_end-sw-14,y+10),label,fill=label_color,font=total_font)
-        val=fmt_brl(value); vw,_=measure(draw,val,total_font)
-        draw.text(((xs[-2]+xs[-1])/2-vw/2,y+10),val,fill=(0,0,0),font=total_font)
-        y+=TABLE_ROW_H_MIN
+            draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
+            label_end=xs[-2]
+            sw,_=measure(draw,label,total_font)
+            draw.text((label_end-sw-14,y+10),label,fill=label_color,font=total_font)
+
+            val=fmt_brl(value)
+            vw,_=measure(draw,val,total_font)
+
+            # valor branco apenas na linha SUBTOTAL/TOTAL azul
+            value_color = WHITE if idx == 0 else (0,0,0)
+
+            draw.text(
+                ((xs[-2]+xs[-1])/2-vw/2, y+10),
+                val,
+                fill=value_color,
+                font=total_font
+            )
+
+            y+=TABLE_ROW_H_MIN
 
     status_text="PREMIER TEM A PAGAR" if total_geral>0 else ("PREMIER TEM A RECEBER" if total_geral<0 else "SEM VALORES")
     status_value=f"R$ {fmt_brl(abs(total_geral))}"; by1=y+35; by2=by1+90
