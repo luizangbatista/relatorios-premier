@@ -657,6 +657,9 @@ def extract_demetra_image_values(img: Image.Image) -> dict:
 # =========================
 # PDF
 # =========================
+# =========================
+# PDF
+# =========================
 def extract_pdf_lines(uploaded_file):
     lines = []
     with pdfplumber.open(uploaded_file) as pdf:
@@ -667,6 +670,11 @@ def extract_pdf_lines(uploaded_file):
 
 
 def process_pdf_by_client(uploaded_file, cliente_alvo: str):
+    """Lê linhas do PDF e aplica o RB% cadastrado no MAPA_IDS_PDF.
+
+    Para Oscar, também captura a terceira coluna monetária como REBATE.
+    O RAKEBACK presente no PDF nunca é usado como percentual.
+    """
     rows = []
     for line in extract_pdf_lines(uploaded_file):
         if "R$" not in line:
@@ -674,53 +682,135 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
         id_match = re.search(r"\b(0|\d{6,9})\b", line)
         if not id_match:
             continue
-
-        id_agente =           normalize_id(id_match.group(1))
+        id_agente = normalize_id(id_match.group(1))
+        info = MAPA_IDS_PDF.get(id_agente)
+        if not info or info["cliente"] != cliente_alvo:
+            continue
 
         money_matches = re.findall(r"R\$\s*-?\d[\d\.,]*", line)
         if len(money_matches) < 2:
             continue
 
-        info = MAPA_IDS_PDF.get(id_agente)
-        if not info or info["cliente"] !=         cliente_alvo:
-            continue
-
-        ganhos =    parse_money(money_matches[0])
+        ganhos = parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
-        agente = re.sub(r"\s{2,}", " ",  line[:id_match.start()].strip())
-        rows.append({"agente": agente, "ganhos": ganhos, "rake": rake, "rb_percentual": float(info["rb"])})
+        rebate = parse_money(money_matches[2]) if cliente_alvo == "Oscar" and len(money_matches) >= 3 else 0.0
+        agente = re.sub(r"\s{2,}", " ", line[:id_match.start()].strip())
+        rows.append({
+            "agente": agente,
+            "id_agente": id_agente,
+            "ganhos": ganhos,
+            "rake": rake,
+            "rebate": rebate,
+            "rb_percentual": float(info["rb"]),
+        })
     return pd.DataFrame(rows)
+
+
+# =========================
+# OCR POR NOME DE AGENTE
+# =========================
+def _ocr_data(img: Image.Image):
+    if not TESSERACT_OK:
+        return None
+    try:
+        proc = preprocess_for_ocr(img)
+        return pytesseract.image_to_data(proc, lang="eng", config="--oem 3 --psm 6", output_type=pytesseract.Output.DATAFRAME)
+    except Exception:
+        return None
+
+
+def _norm_name(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+
+def find_agent_y(img: Image.Image, aliases) -> int | None:
+    """Localiza verticalmente um agente pelo texto, sem depender da ordem da tabela."""
+    data = _ocr_data(img)
+    targets = [_norm_name(a) for a in aliases]
+    if data is not None and not data.empty:
+        data = data.dropna(subset=["text"])
+        for _, row in data.iterrows():
+            token = _norm_name(row.get("text", ""))
+            if token and any(t in token or token in t for t in targets if len(t) >= 4):
+                return int(row["top"] + row["height"] / 2)
+
+    # fallback por linhas OCR; estima o centro da linha pela posição no texto
+    full = ocr_image(img, psm=6)
+    lines = [ln for ln in full.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        nline = _norm_name(line)
+        if any(t in nline for t in targets):
+            return int(img.height * (0.25 + 0.55 * (i / max(1, len(lines) - 1))))
+    return None
+
+
+def ocr_row_value(img: Image.Image, y_center: int, x1: float, x2: float) -> tuple[str, float]:
+    h = img.height
+    band = max(28, int(h * 0.045))
+    box = (int(img.width * x1), max(0, y_center - band), int(img.width * x2), min(h, y_center + band))
+    crop = img.crop(box).resize((max(1, int((box[2]-box[0]) * 4)), max(1, int((box[3]-box[1]) * 4))))
+    txt = "\n".join([ocr_image(crop, psm=7), ocr_image(crop, psm=6), ocr_image(crop, psm=11)])
+    vals = [v for v in extract_all_money_misto(txt) if abs(v) < 1000000]
+    return txt, (vals[0] if vals else 0.0)
+
+
+def extract_agent_from_adamantium_table(img: Image.Image, aliases, display_name: str) -> dict:
+    y = find_agent_y(img, aliases)
+    if y is None:
+        return {"found": False, "agente": display_name, "ganhos": 0.0, "rake": 0.0, "ocr_text": "Agente não localizado."}
+
+    # Layout observado: SUPER AGENTE | Rake | -25% | Ganhos | Resultado
+    rake_txt, rake = ocr_row_value(img, y, 0.30, 0.46)
+    ganhos_txt, ganhos = ocr_row_value(img, y, 0.57, 0.74)
+    return {
+        "found": True,
+        "agente": display_name,
+        "ganhos": ganhos,
+        "rake": rake,
+        "ocr_text": f"Y localizado: {y}\n\nOCR RAKE:\n{rake_txt}\n\nOCR GANHOS:\n{ganhos_txt}",
+    }
+
+
+def extract_suprema_total(img: Image.Image) -> dict:
+    """Extrai somente o campo TOTAL da imagem Suprema."""
+    text = "\n".join([ocr_image(img, psm=6), ocr_image(img, psm=11)])
+    patterns = [
+        r"TOTAL[^0-9\-]*R?\$?\s*([\-−–—]?\s*[0-9][0-9\.,]*)",
+        r"TOTAL[^0-9\-]*([\-−–—]?[0-9][0-9\.,]*)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return {"total": parse_money(m.group(1)), "ocr_text": text}
+
+    # fallback: recorte da região inferior-central onde aparece TOTAL
+    w, h = img.size
+    crop = img.crop((int(w * 0.32), int(h * 0.55), int(w * 0.72), int(h * 0.82))).resize((int(w * 1.6), int(h * 1.08)))
+    crop_text = "\n".join([ocr_image(crop, psm=6), ocr_image(crop, psm=11)])
+    vals = extract_all_money_misto(crop_text)
+    total = vals[-1] if vals else 0.0
+    return {"total": total, "ocr_text": text + "\n\nOCR RECORTE TOTAL:\n" + crop_text}
 
 
 # =========================
 # CÁLCULOS
 # =========================
-def calc_row(ganhos: float, rake: float, rb_percentual: float, rebate_percentual: float):
-    rb_valor = rake * (rb_percentual / 100.0)
-    total_base = ganhos + rb_valor
-    rebate = total_base * (rebate_percentual / 100.0) if total_base > 0 else 0.0
-    total_final = total_base + rebate
-    return total_base, rebate, total_final
+def rb_value(rake: float, rb_percentual: float) -> float:
+    return float(rake) * float(rb_percentual) / 100.0
 
 
-def calc_oscar_row(ganhos: float, rake: float, rb_percentual: float):
-    """Oscar: o total do agente é somente o rakeback; ganhos não entram no cálculo."""
-    rb_valor = rake * (rb_percentual / 100.0)
-    total_base = rb_valor
-    return total_base, 0.0, total_base
-
-
-def calc_alex_row(ganhos: float, rake: float, rb_percentual: float):
-    rb_valor = rake * (rb_percentual / 100.0)
-    total_base = ganhos + rb_valor
-    if total_base > 0:
-        rebate = total_base * (REBATE_ALEX_POSITIVO / 100.0)
-    elif total_base < 0:
-        rebate = total_base * (REBATE_ALEX_NEGATIVO / 100.0)
-    else:
-        rebate = 0.0
-    total_final = total_base + rebate
-    return total_base, rebate, total_final
+def base_row(agent: str, ganhos: float, rake: float, rb_percentual: float, total_override=None, rebate=0.0):
+    rb = rb_value(rake, rb_percentual)
+    total = ganhos + rb if total_override is None else float(total_override)
+    return {
+        "AGENTE": agent,
+        "GANHOS": float(ganhos),
+        "RAKE": float(rake),
+        "RB(%)": f"{int(rb_percentual) if float(rb_percentual).is_integer() else rb_percentual}%",
+        "RB": rb,
+        "REBATE": float(rebate),
+        "TOTAL": total,
+    }
 
 
 # =========================
@@ -730,22 +820,17 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     W, H = SUMMARY_W, SUMMARY_H
     img = Image.new("RGB", (W, H), GRAY)
     draw = ImageDraw.Draw(img)
-
     title_font = get_font(FONT_TITLE, bold=True)
     subtitle_font = get_font(FONT_SUBTITLE, bold=False)
     subtitle_bold = get_font(FONT_SUBTITLE, bold=True)
     header_font = get_font(FONT_HEADER, bold=True)
     value_font = get_font(FONT_CELL, bold=False)
-    small_font = get_font(FONT_CELL, bold=False)
     total_font = get_font(FONT_TOTAL, bold=True)
     status_font = get_font(FONT_STATUS, bold=True)
     status_value_font = get_font(FONT_STATUS_VALUE, bold=True)
 
     tw, _ = measure(draw, titulo, title_font)
     draw.text(((W - tw) / 2, 40), titulo, fill=NAVY, font=title_font)
-    draw.line((70, 115, 300, 115), fill=GOLD, width=3)
-    draw.line((1100, 115, 1330, 115), fill=GOLD, width=3)
-
     label = "Período do fechamento:"
     l_w, _ = measure(draw, label, subtitle_font)
     p_w, _ = measure(draw, periodo, subtitle_bold)
@@ -753,176 +838,101 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     draw.text((x0, 150), label, fill=NAVY, font=subtitle_font)
     draw.text((x0 + l_w + 12, 150), periodo, fill=NAVY, font=subtitle_bold)
 
-    table_x1, table_x2 = 60, 1340
-    header_y1, header_y2 = 250, 325
-    values_y1, values_y2 = 325, 455
-    draw.rounded_rectangle((table_x1, header_y1, table_x2, values_y2), radius=14, outline=NAVY, width=3, fill="white")
-    draw.rounded_rectangle((table_x1, header_y1, table_x2, header_y2), radius=14, fill=NAVY)
-    draw.rectangle((table_x1, header_y2 - 14, table_x2, header_y2), fill=NAVY)
-
-    col_w = (table_x2 - table_x1) / 4
-    for i in range(1, 4):
-        x = table_x1 + i * col_w
-        draw.line((x, header_y1, x, values_y2), fill=(160, 160, 160), width=2)
-
-    for i, col in enumerate(headers):
-        cx = table_x1 + i * col_w + col_w / 2
-        cw, _ = measure(draw, col, header_font)
-        draw.text((cx - cw / 2, header_y1 + 22), col, fill=WHITE, font=header_font)
-
-    for i, val in enumerate(values):
-        sval = fmt_brl(val)
-        cx = table_x1 + i * col_w + col_w / 2
-        vw, _ = measure(draw, sval, value_font)
-        draw.text((cx - vw / 2, values_y1 + 45), sval, fill=NAVY, font=value_font)
-
-    draw.rectangle((60, 490, 1340, 550), fill=LIGHT_GRAY)
-    rebate_label = "-5% total" if rebate != 0 else "Sem rebate"
-    rebate_value = fmt_brl(rebate) if rebate != 0 else "0,00"
-    rl_w, _ = measure(draw, rebate_label, small_font)
-    rv_w, _ = measure(draw, rebate_value, small_font)
-    draw.text((1000 - rl_w, 506), rebate_label, fill=NAVY, font=small_font)
-    draw.text((1310 - rv_w, 506), rebate_value, fill=NAVY, font=small_font)
-
-    draw.rectangle((60, 550, 1340, 635), fill=YELLOW)
-    tlabel, tvalue = "TOTAL", fmt_brl(total_final)
-    tl_w, _ = measure(draw, tlabel, total_font)
-    tv_w, _ = measure(draw, tvalue, total_font)
-    draw.text((1040 - tl_w, 575), tlabel, fill=(0, 0, 0), font=total_font)
-    draw.text((1310 - tv_w, 575), tvalue, fill=(0, 0, 0), font=total_font)
-
+    x1, x2, y1, y2 = 60, 1340, 250, 455
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=14, outline=NAVY, width=3, fill=WHITE)
+    draw.rectangle((x1, y1, x2, 325), fill=NAVY)
+    col_w = (x2-x1)/len(headers)
+    for i, htxt in enumerate(headers):
+        cx=x1+(i+.5)*col_w; sw,_=measure(draw,htxt,header_font)
+        draw.text((cx-sw/2,272),htxt,fill=WHITE,font=header_font)
+        val=fmt_brl(values[i]); vw,_=measure(draw,val,value_font)
+        draw.text((cx-vw/2,365),val,fill=NAVY,font=value_font)
+    draw.rectangle((60,550,1340,635),fill=YELLOW)
+    val=fmt_brl(total_final); vw,_=measure(draw,val,total_font)
+    draw.text((980,575),"TOTAL",fill=(0,0,0),font=total_font)
+    draw.text((1310-vw,575),val,fill=(0,0,0),font=total_font)
     status_text = "PREMIER TEM A PAGAR" if total_final > 0 else ("PREMIER TEM A RECEBER" if total_final < 0 else "SEM VALORES")
-    status_value = f"R$ {fmt_brl(abs(total_final))}"
-    draw.rounded_rectangle((60, 710, 1340, 835), radius=16, outline=NAVY, width=3, fill=LIGHT_BG)
-    stw, _ = measure(draw, status_text, status_font)
-    svw, _ = measure(draw, status_value, status_value_font)
-    start_x = (W - (stw + 24 + svw)) / 2
-    draw.text((start_x, 748), status_text, fill=NAVY, font=status_font)
-    draw.text((start_x + stw + 24, 744), status_value, fill=GREEN if total_final >= 0 else RED, font=status_value_font)
+    status_value=f"R$ {fmt_brl(abs(total_final))}"
+    draw.rounded_rectangle((60,710,1340,835),radius=16,outline=NAVY,width=3,fill=LIGHT_BG)
+    stw,_=measure(draw,status_text,status_font); svw,_=measure(draw,status_value,status_value_font)
+    sx=(W-(stw+24+svw))/2
+    draw.text((sx,748),status_text,fill=NAVY,font=status_font)
+    draw.text((sx+stw+24,744),status_value,fill=GREEN if total_final>=0 else RED,font=status_value_font)
     return img
 
 
 def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
-    return generate_summary_report(
-        "HARNEFER",
-        periodo,
-        ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"],
-        [ganhos, rake, rake * (RB_HARNEFER / 100.0), ganhos + rake * (RB_HARNEFER / 100.0)],
-        0.0,
-        ganhos + rake * (RB_HARNEFER / 100.0),
-    )
+    rb = rake * (RB_HARNEFER / 100.0)
+    return generate_summary_report("HARNEFER", periodo, ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"], [ganhos, rake, rb, ganhos+rb], 0, ganhos+rb)
 
 
-def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float, rebate_total: float, rebate_label: str, total_base_exibido: float | None = None) -> Image.Image:
-    temp_img = Image.new("RGB", (10, 10), WHITE)
-    temp_draw = ImageDraw.Draw(temp_img)
-    agent_font = get_font(FONT_AGENT, bold=False)
-    line_h = measure(temp_draw, "Ag", agent_font)[1] + 4
-    agente_col_width = 500 - 24
-
-    row_heights = []
-    for _, row in df.iterrows():
-        lines = wrap_text(temp_draw, str(row["AGENTE"]), agent_font, agente_col_width)
-        row_heights.append(max(TABLE_ROW_H_MIN, len(lines) * line_h + 16))
-
-    H = TABLE_TOP + TABLE_HEADER_H + sum(row_heights) + (3 * TABLE_ROW_H_MIN) + 180
+def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float,
+                                adjustment_rows=None, total_base_exibido: float | None = None) -> Image.Image:
+    """Gera tabela com colunas variáveis e linhas-resumo ao final."""
+    adjustment_rows = adjustment_rows or []
+    columns = list(df.columns)
+    n = len(columns)
     W = TABLE_W
-    img = Image.new("RGB", (W, H), GRAY)
-    draw = ImageDraw.Draw(img)
+    x1 = 40
+    usable = W - 80
+    agent_w = 390 if n <= 6 else 300
+    remaining = usable - agent_w
+    other_w = remaining / max(1, n-1)
+    widths = [agent_w] + [other_w]*(n-1)
+    xs=[x1]
+    for w in widths: xs.append(xs[-1]+w)
 
-    title_font = get_font(FONT_TITLE, bold=True)
-    subtitle_font = get_font(FONT_SUBTITLE, bold=False)
-    subtitle_bold = get_font(FONT_SUBTITLE, bold=True)
-    header_font = get_font(FONT_HEADER, bold=True)
-    cell_font = get_font(FONT_CELL, bold=False)
-    agent_font = get_font(FONT_AGENT, bold=False)
-    total_font = get_font(FONT_TOTAL, bold=True)
-    status_font = get_font(FONT_STATUS, bold=True)
-    status_value_font = get_font(FONT_STATUS_VALUE, bold=True)
+    temp=Image.new("RGB",(10,10),WHITE); td=ImageDraw.Draw(temp)
+    agent_font=get_font(22); line_h=measure(td,"Ag",agent_font)[1]+4
+    row_heights=[]
+    for _,row in df.iterrows():
+        lines=wrap_text(td,str(row[columns[0]]),agent_font,widths[0]-20)
+        row_heights.append(max(TABLE_ROW_H_MIN,len(lines)*line_h+16))
 
-    total_azul = total_geral if total_base_exibido is None else total_base_exibido
+    summary_count = 1 + len(adjustment_rows)
+    H = TABLE_TOP + TABLE_HEADER_H + sum(row_heights) + summary_count*TABLE_ROW_H_MIN + 180
+    img=Image.new("RGB",(W,H),GRAY); draw=ImageDraw.Draw(img)
+    title_font=get_font(FONT_TITLE,True); subtitle_font=get_font(FONT_SUBTITLE); subtitle_bold=get_font(FONT_SUBTITLE,True)
+    header_font=get_font(24,True); cell_font=get_font(24); total_font=get_font(FONT_TOTAL,True)
+    status_font=get_font(FONT_STATUS,True); status_value_font=get_font(FONT_STATUS_VALUE,True)
 
-    tw, _ = measure(draw, titulo, title_font)
-    draw.text(((W - tw) / 2, 20), titulo, fill=NAVY, font=title_font)
-    draw.line((60, 70, 250, 70), fill=GOLD, width=3)
-    draw.line((1190, 70, 1380, 70), fill=GOLD, width=3)
+    tw,_=measure(draw,titulo,title_font); draw.text(((W-tw)/2,20),titulo,fill=NAVY,font=title_font)
+    label="Período do fechamento:"; lw,_=measure(draw,label,subtitle_font); pw,_=measure(draw,periodo,subtitle_bold)
+    sx=(W-(lw+12+pw))/2; draw.text((sx,100),label,fill=NAVY,font=subtitle_font); draw.text((sx+lw+12,100),periodo,fill=NAVY,font=subtitle_bold)
 
-    label = "Período do fechamento:"
-    l_w, _ = measure(draw, label, subtitle_font)
-    p_w, _ = measure(draw, periodo, subtitle_bold)
-    x0 = (W - (l_w + 12 + p_w)) / 2
-    draw.text((x0, 100), label, fill=NAVY, font=subtitle_font)
-    draw.text((x0 + l_w + 12, 100), periodo, fill=NAVY, font=subtitle_bold)
+    draw.rectangle((x1,TABLE_TOP,xs[-1],TABLE_TOP+TABLE_HEADER_H),fill=NAVY)
+    for i,c in enumerate(columns):
+        txt=str(c); sw,_=measure(draw,txt,header_font); cx=(xs[i]+xs[i+1])/2
+        draw.text((cx-sw/2,TABLE_TOP+13),txt,fill=WHITE,font=header_font)
 
-    x1 = 50
-    widths = [500, 210, 210, 130, 260]
-    headers = ["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]
-    xs = [x1]
-    for w in widths:
-        xs.append(xs[-1] + w)
-    table_w = sum(widths)
+    y=TABLE_TOP+TABLE_HEADER_H
+    for pos,(_,row) in enumerate(df.iterrows()):
+        rh=row_heights[pos]; draw.rectangle((x1,y,xs[-1],y+rh),fill=WHITE,outline=GRID,width=2)
+        wrapped=wrap_text(draw,str(row[columns[0]]),agent_font,widths[0]-20)
+        for j,line in enumerate(wrapped): draw.text((xs[0]+10,y+8+j*line_h),line,fill=(0,0,0),font=agent_font)
+        for i,c in enumerate(columns[1:],start=1):
+            v=row[c]
+            txt=str(v) if isinstance(v,str) else fmt_brl(v)
+            sw,sh=measure(draw,txt,cell_font); cx=(xs[i]+xs[i+1])/2
+            draw.text((cx-sw/2,y+(rh-sh)/2-2),txt,fill=(0,0,0),font=cell_font)
+        y+=rh
 
-    draw.rectangle((x1, TABLE_TOP, x1 + table_w, TABLE_TOP + TABLE_HEADER_H), fill=NAVY)
-    for i, htxt in enumerate(headers):
-        cx = (xs[i] + xs[i + 1]) / 2
-        cw, _ = measure(draw, htxt, header_font)
-        draw.text((cx - cw / 2, TABLE_TOP + 12), htxt, fill=WHITE, font=header_font)
+    total_base = total_geral if total_base_exibido is None else total_base_exibido
+    summary = [("SUBTOTAL" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
+    for idx,(label,value,bg,label_color) in enumerate(summary):
+        draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
+        label_end=xs[-2]
+        sw,_=measure(draw,label,total_font); draw.text((label_end-sw-14,y+10),label,fill=label_color,font=total_font)
+        val=fmt_brl(value); vw,_=measure(draw,val,total_font)
+        draw.text(((xs[-2]+xs[-1])/2-vw/2,y+10),val,fill=(0,0,0),font=total_font)
+        y+=TABLE_ROW_H_MIN
 
-    y = TABLE_TOP + TABLE_HEADER_H
-    for idx, row in df.iterrows():
-        row_h = row_heights[idx]
-        draw.rectangle((x1, y, x1 + table_w, y + row_h), fill=WHITE, outline=GRID, width=2)
-
-        wrapped = wrap_text(draw, str(row["AGENTE"]), agent_font, agente_col_width)
-        for j, line in enumerate(wrapped):
-            draw.text((xs[0] + 12, y + 8 + j * line_h), line, fill=(0, 0, 0), font=agent_font)
-
-        vals = [fmt_brl(row["GANHOS"]), fmt_brl(row["RAKE"]), str(row["RB"]), fmt_brl(row["TOTAL"])]
-        for i, val in enumerate(vals, start=1):
-            vw, vh = measure(draw, val, cell_font)
-            cx = (xs[i] + xs[i + 1]) / 2
-            cy = y + (row_h - vh) / 2 - 2
-            draw.text((cx - vw / 2, cy), val, fill=(0, 0, 0), font=cell_font)
-
-        y += row_h
-
-    draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=WHITE, outline=GRID, width=2)
-    draw.rectangle((x1, y, xs[4], y + TABLE_ROW_H_MIN), fill=NAVY)
-    total_label = "TOTAL"
-    tlw, _ = measure(draw, total_label, total_font)
-    draw.text((xs[4] - tlw - 16, y + 10), total_label, fill=WHITE, font=total_font)
-    total_azul_str = fmt_brl(total_azul)
-    tvw, _ = measure(draw, total_azul_str, total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - tvw / 2, y + 10), total_azul_str, fill=(0, 0, 0), font=total_font)
-    y += TABLE_ROW_H_MIN
-
-    draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=LIGHT_GRAY, outline=GRID, width=2)
-    rlabel = rebate_label if rebate_total != 0 else "Sem rebate"
-    rvalue = fmt_brl(rebate_total) if rebate_total != 0 else "0,00"
-    rlw, _ = measure(draw, rlabel, cell_font)
-    rvw, _ = measure(draw, rvalue, cell_font)
-    draw.text((xs[4] - rlw - 16, y + 12), rlabel, fill=(0, 0, 0), font=cell_font)
-    draw.text((((xs[4] + xs[5]) / 2) - rvw / 2, y + 12), rvalue, fill=(0, 0, 0), font=cell_font)
-    y += TABLE_ROW_H_MIN
-
-    draw.rectangle((x1, y, x1 + table_w, y + TABLE_ROW_H_MIN), fill=YELLOW, outline=GRID, width=2)
-    total_final_str = fmt_brl(total_geral)
-    flw, _ = measure(draw, total_label, total_font)
-    fvw, _ = measure(draw, total_final_str, total_font)
-    draw.text((xs[4] - flw - 16, y + 10), total_label, fill=(0, 0, 0), font=total_font)
-    draw.text((((xs[4] + xs[5]) / 2) - fvw / 2, y + 10), total_final_str, fill=(0, 0, 0), font=total_font)
-    y += TABLE_ROW_H_MIN
-
-    status_text = "PREMIER TEM A PAGAR" if total_geral > 0 else ("PREMIER TEM A RECEBER" if total_geral < 0 else "SEM VALORES")
-    status_value = f"R$ {fmt_brl(abs(total_geral))}"
-    box_y1 = y + 35
-    box_y2 = box_y1 + 90
-    draw.rounded_rectangle((50, box_y1, x1 + table_w, box_y2), radius=14, outline=NAVY, width=3, fill=LIGHT_BG)
-    stw, _ = measure(draw, status_text, status_font)
-    svw, _ = measure(draw, status_value, status_value_font)
-    start_x = (W - (stw + 20 + svw)) / 2
-    draw.text((start_x, box_y1 + 28), status_text, fill=NAVY, font=status_font)
-    draw.text((start_x + stw + 20, box_y1 + 24), status_value, fill=GREEN if total_geral >= 0 else RED, font=status_value_font)
+    status_text="PREMIER TEM A PAGAR" if total_geral>0 else ("PREMIER TEM A RECEBER" if total_geral<0 else "SEM VALORES")
+    status_value=f"R$ {fmt_brl(abs(total_geral))}"; by1=y+35; by2=by1+90
+    draw.rounded_rectangle((40,by1,xs[-1],by2),radius=14,outline=NAVY,width=3,fill=LIGHT_BG)
+    sw,_=measure(draw,status_text,status_font); vw,_=measure(draw,status_value,status_value_font); start=(W-(sw+20+vw))/2
+    draw.text((start,by1+28),status_text,fill=NAVY,font=status_font)
+    draw.text((start+sw+20,by1+24),status_value,fill=GREEN if total_geral>=0 else RED,font=status_value_font)
     return img
 
 
@@ -931,272 +941,121 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 # =========================
 def page_harnefer():
     st.subheader("Harnefer")
-    periodo = st.text_input("Período do fechamento", key="periodo_harnefer", placeholder="13/04/2026 a 19/04/2026")
-    arquivo = st.file_uploader("Envie a imagem do Harnefer", type=["png", "jpg", "jpeg", "webp"], key="harnefer_img")
-
+    periodo=st.text_input("Período do fechamento",key="periodo_harnefer",placeholder="13/04/2026 a 19/04/2026")
+    arquivo=st.file_uploader("Envie a imagem do Harnefer",type=["png","jpg","jpeg","webp"],key="harnefer_img")
     if not TESSERACT_OK:
-        st.error("OCR indisponível: instale `pytesseract` e `tesseract-ocr`.")
-        return
-
-    if arquivo and st.button("Ler imagem e gerar fechamento", type="primary", key="btn_harnefer"):
-        img = Image.open(arquivo)
-        if not detect_harnefer_image(img):
-            st.warning("Não identifiquei a imagem do Harnefer com segurança.")
-            return
-
-        dados = extract_harnefer_values(img)
-
-        with st.expander("Diagnóstico OCR", expanded=False):
-            st.image(dados["crop"], caption="Recorte usado para leitura", width=700)
-            st.code(dados["ocr_fee"])
-            st.code(dados["ocr_winnings"])
-
-        report = generate_harnefer_report(periodo.strip() or "-", dados["ganhos"], dados["rake"])
-        st.image(report, caption="Relatório final", use_container_width=True)
-        st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="harnefer_fechamento.png", mime="image/png")
-
-
-def page_demetra():
-    st.subheader("Demetra")
-    periodo = st.text_input("Período do fechamento", key="periodo_demetra", placeholder="06/04/2026 a 12/04/2026")
-    planilha = st.file_uploader("Envie a planilha 2101...", type=["xlsx", "xls"], key="demetra_xlsx")
-    imagem_killuminatti_novo = st.file_uploader(
-        "Envie a imagem do Killuminatti - novo formato",
-        type=["png", "jpg", "jpeg", "webp"],
-        key="demetra_killuminatti_novo_img",
-    )
-    pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="demetra_pdf")
-    imagem = st.file_uploader("Envie a imagem do Killuminatti", type=["png", "jpg", "jpeg", "webp"], key="demetra_img")
-
-    rows = []
-    if planilha is not None:
-        demetra_df = process_demetra_excel(planilha)
-        if not demetra_df.empty:
-            ganhos_excel = demetra_df["ganhos"].sum()
-            rake_excel = demetra_df["rake"].sum()
-            total_base, rebate, total_final = calc_row(ganhos_excel, rake_excel, RB_DEMETRA_PLANILHA, REBATE_DEMETRA)
-            rows.append({"AGENTE": AGENTE_PLANILHA_DEMETRA, "GANHOS": ganhos_excel, "RAKE": rake_excel, "RB": f"{int(RB_DEMETRA_PLANILHA)}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
-        else:
-            st.info("Nenhuma linha encontrada para TheShark_ com ID 11719117 na planilha.")
-
-    if pdf is not None:
-        df_pdf = process_pdf_by_client(pdf, "Demetra")
-        for _, row in df_pdf.iterrows():
-            total_base, rebate, total_final = calc_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]), REBATE_DEMETRA)
-            rows.append({"AGENTE": row["agente"], "GANHOS": float(row["ganhos"]), "RAKE": float(row["rake"]), "RB": f"{int(float(row['rb_percentual']))}%", "TOTAL": total_base, "_REBATE": rebate, "_TOTAL_FINAL": total_final})
-
-    if imagem is not None:
-        img = Image.open(imagem)
-        if detect_demetra_image(img):
-            dados = extract_demetra_image_values(img)
-            with st.expander("Diagnóstico OCR - Demetra imagem", expanded=False):
-                st.code(dados["ocr_text"])
-
-            if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
-                st.warning("Não consegui ler Rake/Ganhos com segurança nessa imagem do Demetra.")
-            else:
-                total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_DEMETRA)
-                rows.append({
-                    "AGENTE": dados["agente"],
-                    "GANHOS": dados["ganhos"],
-                    "RAKE": dados["rake"],
-                    "RB": f"{int(dados['rb_percentual'])}%",
-                    "TOTAL": total_base,
-                    "_REBATE": rebate,
-                    "_TOTAL_FINAL": total_final,
-                })
-        else:
-            st.warning("Não identifiquei a imagem do Demetra com segurança.")
-
-    if imagem_killuminatti_novo is not None:
-        img = Image.open(imagem_killuminatti_novo)
-        dados = extract_demetra_killuminatti_novo(img)
-
-        with st.expander("Diagnóstico OCR - Killuminatti novo formato", expanded=False):
-            st.code(dados["ocr_text"])
-
-        if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
-            st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem nova do Killuminatti.")
-        else:
-            total_base, rebate, total_final = calc_row(dados["ganhos"], dados["rake"], dados["rb_percentual"], REBATE_DEMETRA)
-            rows.append({
-                "AGENTE": dados["agente"],
-                "GANHOS": dados["ganhos"],
-                "RAKE": dados["rake"],
-                "RB": f"{int(dados['rb_percentual'])}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
-
-    if st.button("Gerar fechamento Demetra", type="primary", key="btn_demetra"):
-        if not rows:
-            st.warning("Envie a planilha, o PDF e/ou a imagem do Demetra.")
-            return
-        detalhado = pd.DataFrame(rows)
-        total_base_geral = detalhado["TOTAL"].sum()
-        rebate_total = total_base_geral * (REBATE_DEMETRA / 100.0) if total_base_geral > 0 else 0.0
-        total_geral = total_base_geral + rebate_total
-
-        report = generate_client_table_image(
-            "DEMETRA",
-            periodo.strip() or "-",
-            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
-            total_geral,
-            rebate_total,
-            "-5% total",
-            total_base_exibido=total_base_geral,
-        )
-        st.image(report, caption="Pronto para print", use_container_width=True)
-        st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="demetra_fechamento.png", mime="image/png")
-
-
-def page_oscar():
-    st.subheader("Oscar")
-    periodo = st.text_input("Período do fechamento", key="periodo_oscar", placeholder="06/04/2026 a 12/04/2026")
-    pdf = st.file_uploader("Envie o PDF", type=["pdf"], key="oscar_pdf")
-    imagem_suprema = st.file_uploader("Envie a imagem da SUPREMA", type=["png", "jpg", "jpeg", "webp"], key="oscar_suprema_img")
-    rows = []
-
-    if pdf is not None:
-        df_pdf = process_pdf_by_client(pdf, "Oscar")
-        for _, row in df_pdf.iterrows():
-            # OSCAR: TOTAL = rake * %RB. Ganhos ficam só para exibição.
-            total_base, rebate, total_final = calc_oscar_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
-            rows.append({
-                "AGENTE": row["agente"],
-                "GANHOS": float(row["ganhos"]),
-                "RAKE": float(row["rake"]),
-                "RB": f"{int(float(row['rb_percentual']))}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
-
-    if imagem_suprema is not None:
-        img = Image.open(imagem_suprema)
-        dados = extract_suprema_values(img)
-        with st.expander("Diagnóstico OCR - SUPREMA", expanded=False):
-            st.code(dados["ocr_text"])
-
-        if dados["ganhos"] == 0.0 and dados["rake"] == 0.0:
-            st.warning("Não consegui ler os valores da SUPREMA com segurança nessa imagem.")
-        else:
-            # OSCAR: TOTAL = rake * %RB. Ganhos ficam só para exibição.
-            total_base, rebate, total_final = calc_oscar_row(dados["ganhos"], dados["rake"], dados["rb_percentual"])
-            rows.append({
-                "AGENTE": dados["agente"],
-                "GANHOS": dados["ganhos"],
-                "RAKE": dados["rake"],
-                "RB": f"{int(dados['rb_percentual'])}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
-
-    if st.button("Gerar fechamento Oscar", type="primary", key="btn_oscar"):
-        if not rows:
-            st.warning("Envie o PDF e/ou a imagem da SUPREMA.")
-            return
-        detalhado = pd.DataFrame(rows)
-
-        # No Oscar, o total base é a soma apenas dos rakebacks das linhas.
-        # Ganhos não entram no cálculo.
-        total_base_geral = detalhado["TOTAL"].sum()
-        rebate_total = total_base_geral * (REBATE_OSCAR / 100.0) if total_base_geral > 0 else 0.0
-        total_geral = total_base_geral + rebate_total
-
-        report = generate_client_table_image(
-            "OSCAR",
-            periodo.strip() or "-",
-            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
-            total_geral,
-            rebate_total,
-            "-10% total",
-            total_base_exibido=total_base_geral,
-        )
-        st.image(report, caption="Pronto para print", use_container_width=True)
-        st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="oscar_fechamento.png", mime="image/png")
+        st.error("OCR indisponível: instale `pytesseract` e `tesseract-ocr`."); return
+    if arquivo and st.button("Ler imagem e gerar fechamento",type="primary",key="btn_harnefer"):
+        img=Image.open(arquivo)
+        if not detect_harnefer_image(img): st.warning("Não identifiquei a imagem do Harnefer com segurança."); return
+        dados=extract_harnefer_values(img)
+        report=generate_harnefer_report(periodo.strip() or "-",dados["ganhos"],dados["rake"])
+        st.image(report,caption="Relatório final",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="harnefer_fechamento.png",mime="image/png")
 
 
 def page_alex():
     st.subheader("Alex")
-    periodo = st.text_input("Período do fechamento", key="periodo_alex", placeholder="06/04/2026 a 12/04/2026")
-    pdf = st.file_uploader("Envie o PDF do Alex", type=["pdf"], key="alex_pdf")
-    imagem = st.file_uploader("Envie a imagem Gustavo | Casarica", type=["png", "jpg", "jpeg", "webp"], key="alex_img")
-
-    rows = []
-
+    periodo=st.text_input("Período do fechamento",key="periodo_alex",placeholder="06/04/2026 a 12/04/2026")
+    pdf=st.file_uploader("Envie o PDF do Alex",type=["pdf"],key="alex_pdf")
+    rows=[]
     if pdf is not None:
-        df_pdf = process_pdf_by_client(pdf, "Alex")
-        for _, row in df_pdf.iterrows():
-            total_base, rebate, total_final = calc_alex_row(float(row["ganhos"]), float(row["rake"]), float(row["rb_percentual"]))
-            rows.append({
-                "AGENTE": row["agente"],
-                "GANHOS": float(row["ganhos"]),
-                "RAKE": float(row["rake"]),
-                "RB": f"{int(float(row['rb_percentual']))}%",
-                "TOTAL": total_base,
-                "_REBATE": rebate,
-                "_TOTAL_FINAL": total_final,
-            })
+        for _,r in process_pdf_by_client(pdf,"Alex").iterrows():
+            rows.append(base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"]))
+    if st.button("Gerar fechamento Alex",type="primary",key="btn_alex"):
+        if not rows: st.warning("Envie o PDF do Alex."); return
+        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
+        total=float(df["TOTAL"].sum())
+        report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total)
+        st.image(report,caption="Pronto para print",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="alex_fechamento.png",mime="image/png")
 
+
+def page_oscar():
+    st.subheader("Oscar")
+    periodo=st.text_input("Período do fechamento",key="periodo_oscar",placeholder="06/04/2026 a 12/04/2026")
+    pdf=st.file_uploader("Envie o PDF",type=["pdf"],key="oscar_pdf")
+    rows=[]
+    if pdf is not None:
+        for _,r in process_pdf_by_client(pdf,"Oscar").iterrows():
+            row=base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"],rebate=r["rebate"])
+            row["TOTAL"]=row["GANHOS"]+row["RB"]+row["REBATE"]
+            rows.append(row)
+    if st.button("Gerar fechamento Oscar",type="primary",key="btn_oscar"):
+        if not rows: st.warning("Envie o PDF do Oscar."); return
+        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","REBATE","TOTAL"]]
+        total=float(df["TOTAL"].sum())
+        report=generate_client_table_image("OSCAR",periodo.strip() or "-",df,total)
+        st.image(report,caption="Pronto para print",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="oscar_fechamento.png",mime="image/png")
+
+
+def page_demetra():
+    st.subheader("Demetra")
+    periodo=st.text_input("Período do fechamento",key="periodo_demetra",placeholder="06/04/2026 a 12/04/2026")
+    pdf=st.file_uploader("Envie o PDF",type=["pdf"],key="demetra_pdf")
+    imagem=st.file_uploader("Envie a imagem Killuminatti",type=["png","jpg","jpeg","webp"],key="demetra_killuminatti_img")
+    rows=[]
+    if pdf is not None:
+        for _,r in process_pdf_by_client(pdf,"Demetra").iterrows():
+            rows.append(base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"]))
     if imagem is not None:
-        img = Image.open(imagem)
-        if detect_alex_casarica_image(img):
-            dados = extract_alex_casarica_values(img)
-            with st.expander("Diagnóstico OCR - Casarica", expanded=False):
-                st.write(f"Formato detectado: {dados['formato']}")
-                if dados["ocr_taxa_crop"]:
-                    st.code("OCR recorte Taxa:\n" + dados["ocr_taxa_crop"])
-                if dados["ocr_ganhos_crop"]:
-                    st.code("OCR recorte Ganhos:\n" + dados["ocr_ganhos_crop"])
-            if dados["formato"] == "taxa_ganhos_falhou":
-                st.warning("Não consegui ler Taxa/Ganhos com segurança nessa imagem.")
-            else:
-                rows.append({
-                    "AGENTE": dados["agente"],
-                    "GANHOS": dados["ganhos"],
-                    "RAKE": dados["rake"] / 0.7,
-                    "RB": f"{int(RB_ALEX_IMAGEM_REAL)}%",
-                    "TOTAL": dados["total_base"],
-                    "_REBATE": dados["rebate"],
-                    "_TOTAL_FINAL": dados["total_final"],
-                })
+        img=Image.open(imagem)
+        dados=extract_agent_from_adamantium_table(img,["Killuminatti","KILLUMINATTI"],"Killuminatti")
+        with st.expander("Diagnóstico OCR - Killuminatti",expanded=False): st.code(dados["ocr_text"])
+        if not dados["found"] or (dados["ganhos"]==0 and dados["rake"]==0):
+            st.warning("Não consegui localizar ou ler a linha Killuminatti com segurança.")
         else:
-            st.warning("Não identifiquei a imagem Gustavo | Casarica com segurança.")
+            rows.append(base_row("Killuminatti",dados["ganhos"],dados["rake"],70.0))
+    if st.button("Gerar fechamento Demetra",type="primary",key="btn_demetra"):
+        if not rows: st.warning("Envie o PDF e/ou a imagem Killuminatti."); return
+        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
+        subtotal=float(df["TOTAL"].sum())
+        rebate=subtotal*(REBATE_DEMETRA/100.0) if subtotal>0 else 0.0
+        total=subtotal+rebate
+        adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
+        report=generate_client_table_image("DEMETRA",periodo.strip() or "-",df,total,adjustments,subtotal)
+        st.image(report,caption="Pronto para print",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="demetra_fechamento.png",mime="image/png")
 
-    if st.button("Gerar fechamento Alex", type="primary", key="btn_alex"):
-        if not rows:
-            st.warning("Envie o PDF e/ou a imagem do Casarica.")
-            return
-        detalhado = pd.DataFrame(rows)
 
-        total_base_geral = detalhado["TOTAL"].sum()
-        rebate_total = total_base_geral * (REBATE_ALEX_POSITIVO / 100.0)
-        total_geral = total_base_geral + rebate_total
-
-        report = generate_client_table_image(
-            "ALEX",
-            periodo.strip() or "-",
-            detalhado[["AGENTE", "GANHOS", "RAKE", "RB", "TOTAL"]],
-            total_geral,
-            rebate_total,
-            "-5% total",
-            total_base_exibido=total_base_geral,
-        )
-        st.image(report, caption="Pronto para print", use_container_width=True)
-        st.download_button("Baixar relatório em PNG", data=to_png_bytes(report), file_name="alex_fechamento.png", mime="image/png")
+def page_strong():
+    st.subheader("Strong")
+    periodo=st.text_input("Período do fechamento",key="periodo_strong",placeholder="06/04/2026 a 12/04/2026")
+    suprema=st.file_uploader("Envie a imagem SUPREMA",type=["png","jpg","jpeg","webp"],key="strong_suprema_img")
+    adamantium=st.file_uploader("Envie a imagem ADAMANTIUM",type=["png","jpg","jpeg","webp"],key="strong_adamantium_img")
+    rows=[]; total_suprema=0.0
+    if suprema is not None:
+        s=extract_suprema_total(Image.open(suprema)); total_suprema=s["total"]
+        with st.expander("Diagnóstico OCR - SUPREMA",expanded=False): st.code(s["ocr_text"])
+    if adamantium is not None:
+        img=Image.open(adamantium)
+        p=extract_agent_from_adamantium_table(img,["PPFICHAS","PP FICHAS"],"PPFICHAS")
+        m=extract_agent_from_adamantium_table(img,["MrLeo79","MrLeo","MRLEO79"],"MrLeo79")
+        with st.expander("Diagnóstico OCR - ADAMANTIUM",expanded=False):
+            st.code("PPFICHAS\n"+p["ocr_text"]+"\n\nMrLeo79\n"+m["ocr_text"])
+        if p["found"] and (abs(p["ganhos"])>0.0001 or abs(p["rake"])>0.0001):
+            rows.append(base_row("PPFICHAS",p["ganhos"],p["rake"],70.0))
+        if m["found"] and (abs(m["ganhos"])>0.0001 or abs(m["rake"])>0.0001):
+            rows.append(base_row("MrLeo79",m["ganhos"],m["rake"],70.0,total_override=rb_value(m["rake"],70.0)))
+    if st.button("Gerar fechamento Strong",type="primary",key="btn_strong"):
+        if adamantium is None and suprema is None: st.warning("Envie as imagens SUPREMA e ADAMANTIUM."); return
+        if not rows and total_suprema==0: st.warning("Nenhum valor diferente de zero foi identificado."); return
+        df=pd.DataFrame(rows,columns=["AGENTE","GANHOS","RAKE","RB(%)","RB","REBATE","TOTAL"])
+        if "REBATE" in df.columns: df=df.drop(columns=["REBATE"])
+        df=df[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
+        subtotal=float(df["TOTAL"].sum()) if not df.empty else 0.0
+        total=subtotal+total_suprema
+        adjustments=[("Total SUPREMA",total_suprema,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
+        report=generate_client_table_image("Adamantium PPPoker - STRONG",periodo.strip() or "-",df,total,adjustments,subtotal)
+        st.image(report,caption="Pronto para print",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="strong_fechamento.png",mime="image/png")
 
 
 st.title("Fechamentos Premier")
-cliente = st.selectbox("Escolha o cliente", ["Harnefer", "Demetra", "Oscar", "Alex"])
-
-if cliente == "Harnefer":
-    page_harnefer()
-elif cliente == "Demetra":
-    page_demetra()
-elif cliente == "Oscar":
-    page_oscar()
-else:
-    page_alex()
+cliente=st.selectbox("Escolha o cliente",["Harnefer","Demetra","Oscar","Alex","Strong"])
+if cliente=="Harnefer": page_harnefer()
+elif cliente=="Demetra": page_demetra()
+elif cliente=="Oscar": page_oscar()
+elif cliente=="Alex": page_alex()
+else: page_strong()
