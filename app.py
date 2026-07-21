@@ -15,6 +15,15 @@ import streamlit as st
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 try:
+    import cv2
+    import numpy as np
+    CV2_OK = True
+except Exception:
+    cv2 = None
+    np = None
+    CV2_OK = False
+
+try:
     import pytesseract
     TESSERACT_OK = True
 except Exception:
@@ -666,14 +675,32 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
 
 
 # =========================
-# OCR POR NOME DE AGENTE
+# OCR DINÂMICO DE TABELA
 # =========================
 def _ocr_data(img: Image.Image):
+    """Executa OCR na imagem inteira e preserva as coordenadas de cada token."""
     if not TESSERACT_OK:
         return None
     try:
         proc = preprocess_for_ocr(img)
-        return pytesseract.image_to_data(proc, lang="eng", config="--oem 3 --psm 6", output_type=pytesseract.Output.DATAFRAME)
+        data = pytesseract.image_to_data(
+            proc,
+            lang="eng",
+            config="--oem 3 --psm 6",
+            output_type=pytesseract.Output.DATAFRAME,
+        )
+        if data is None or data.empty:
+            return None
+
+        data = data.dropna(subset=["text"]).copy()
+        data["text"] = data["text"].astype(str).str.strip()
+        data = data[data["text"] != ""].copy()
+        for col in ["left", "top", "width", "height", "conf"]:
+            data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0)
+
+        data["x_center"] = data["left"] + data["width"] / 2
+        data["y_center"] = data["top"] + data["height"] / 2
+        return data
     except Exception:
         return None
 
@@ -683,7 +710,7 @@ def _norm_name(text: str) -> str:
 
 
 def _name_similarity(candidate: str, target: str) -> float:
-    """Pontuação tolerante a falhas comuns do OCR em nomes."""
+    """Pontuação tolerante a pequenas falhas do OCR."""
     candidate = _norm_name(candidate)
     target = _norm_name(target)
     if not candidate or not target:
@@ -692,100 +719,540 @@ def _name_similarity(candidate: str, target: str) -> float:
         return 1.0
     if candidate in target or target in candidate:
         return 0.92
-
-    prefix = 0
-    for a, b in zip(candidate, target):
-        if a != b:
-            break
-        prefix += 1
-
-    prefix_score = min(prefix / max(4, min(len(candidate), len(target))), 1.0)
-    seq_score = SequenceMatcher(None, candidate, target).ratio()
-    return max(seq_score, 0.75 * prefix_score)
+    return SequenceMatcher(None, candidate, target).ratio()
 
 
-def find_agent_y(img: Image.Image, aliases) -> int | None:
-    """Localiza a linha do agente sem depender da ordem.
+def _cluster_ocr_rows(data: pd.DataFrame) -> list[dict]:
+    """Agrupa tokens em linhas usando a posição vertical real, não a ordem do OCR."""
+    if data is None or data.empty:
+        return []
 
-    A faixa de título/cabeçalho é ignorada para não confundir, por exemplo,
-    o título "Killuminatti 25%" com a linha real do agente.
-    """
+    heights = data.loc[data["height"] > 0, "height"]
+    median_h = float(heights.median()) if not heights.empty else 16.0
+    tolerance = max(7.0, median_h * 0.75)
+
+    tokens = data.sort_values(["y_center", "left"]).to_dict("records")
+    groups: list[list[dict]] = []
+    centers: list[float] = []
+
+    for token in tokens:
+        y = float(token["y_center"])
+        best_idx = None
+        best_dist = None
+        for idx, center in enumerate(centers):
+            dist = abs(y - center)
+            if dist <= tolerance and (best_dist is None or dist < best_dist):
+                best_idx = idx
+                best_dist = dist
+
+        if best_idx is None:
+            groups.append([token])
+            centers.append(y)
+        else:
+            groups[best_idx].append(token)
+            centers[best_idx] = sum(float(t["y_center"]) for t in groups[best_idx]) / len(groups[best_idx])
+
+    rows = []
+    for group in groups:
+        group = sorted(group, key=lambda t: float(t["left"]))
+        text = " ".join(str(t["text"]) for t in group if str(t["text"]).strip())
+        rows.append({
+            "tokens": group,
+            "text": text,
+            "norm": _norm_name(text),
+            "y": sum(float(t["y_center"]) for t in group) / len(group),
+            "top": min(float(t["top"]) for t in group),
+            "bottom": max(float(t["top"] + t["height"]) for t in group),
+        })
+
+    return sorted(rows, key=lambda r: r["y"])
+
+
+def _best_token_center(row: dict, aliases: list[str]) -> tuple[float | None, float]:
+    """Retorna o centro X do token mais semelhante a um cabeçalho."""
+    best_x = None
+    best_score = 0.0
+    for token in row["tokens"]:
+        token_text = str(token["text"])
+        for alias in aliases:
+            score = _name_similarity(token_text, alias)
+            if score > best_score:
+                best_score = score
+                best_x = float(token["x_center"])
+    return best_x, best_score
+
+
+def _detect_table_structure(img: Image.Image) -> dict:
+    """Detecta cabeçalhos, centros de colunas e linhas da tabela inteira."""
     data = _ocr_data(img)
-    targets = [_norm_name(a) for a in aliases if _norm_name(a)]
-    min_y = int(img.height * 0.30)
-    max_y = int(img.height * 0.82)
+    rows = _cluster_ocr_rows(data) if data is not None else []
+    if not rows:
+        return {"ok": False, "reason": "OCR não encontrou linhas na imagem.", "rows": []}
+
+    header = None
+    header_score = 0.0
+    for row in rows:
+        rake_x, rake_score = _best_token_center(row, ["rake"])
+        ganhos_x, ganhos_score = _best_token_center(row, ["ganhos", "ganho"])
+        score = rake_score + ganhos_score
+        if rake_x is not None and ganhos_x is not None and score > header_score:
+            header = row
+            header_score = score
+
+    if header is None:
+        return {"ok": False, "reason": "Cabeçalhos RAKE e GANHOS não foram localizados.", "rows": rows}
+
+    header_aliases = {
+        "agente": ["super", "agente"],
+        "rake": ["rake"],
+        "desconto": ["25", "-25", "25%"],
+        "ganhos": ["ganhos", "ganho"],
+        "resultado": ["resultado", "result"] ,
+    }
+
+    centers = {}
+    for name, aliases in header_aliases.items():
+        x, score = _best_token_center(header, aliases)
+        if x is not None and score >= 0.35:
+            centers[name] = x
+
+    if "rake" not in centers or "ganhos" not in centers:
+        return {"ok": False, "reason": "Não foi possível definir as colunas RAKE e GANHOS.", "rows": rows}
+
+    # Cria limites de coluna a partir dos centros detectados no próprio cabeçalho.
+    ordered = sorted((x, name) for name, x in centers.items())
+    bounds = {}
+    for i, (x, name) in enumerate(ordered):
+        left = 0.0 if i == 0 else (ordered[i - 1][0] + x) / 2
+        right = float(img.width) if i == len(ordered) - 1 else (x + ordered[i + 1][0]) / 2
+        bounds[name] = (left, right)
+
+    data_rows = [r for r in rows if r["y"] > header["y"] + max(5.0, (header["bottom"] - header["top"]) * 0.5)]
+    return {
+        "ok": True,
+        "rows": rows,
+        "header": header,
+        "centers": centers,
+        "bounds": bounds,
+        "data_rows": data_rows,
+    }
+
+
+def _numeric_ocr_from_cell(img: Image.Image, box: tuple[int, int, int, int]) -> tuple[str, float]:
+    """Lê uma célula já localizada dinamicamente pelos cabeçalhos e pela linha."""
+    x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        return "", 0.0
+
+    # Pequena margem interna para evitar que as linhas da grade prejudiquem o OCR.
+    mx = max(2, int((x2 - x1) * 0.04))
+    my = max(1, int((y2 - y1) * 0.10))
+    x1, x2 = x1 + mx, x2 - mx
+    y1, y2 = y1 + my, y2 - my
+    crop = img.crop((x1, y1, x2, y2))
+    scale = 5
+    crop_big = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)))
+
+    gray = ImageOps.autocontrast(crop_big.convert("L"))
+    threshold = gray.point(lambda p: 255 if p > 170 else 0)
+    variants = [crop_big, gray, threshold]
+    texts = []
+
+    configs = [
+        "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
+        "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,-",
+        "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789.,-",
+    ]
+
+    for variant in variants:
+        for config in configs:
+            try:
+                txt = pytesseract.image_to_string(variant, lang="eng", config=config) or ""
+            except Exception:
+                txt = ""
+            if txt.strip():
+                texts.append(txt.strip())
+
+    joined = "\n".join(texts)
     candidates = []
+    for txt in texts:
+        candidates.extend(extract_all_money_misto(txt))
 
-    if data is not None and not data.empty:
-        data = data.dropna(subset=["text"]).copy()
-        for col in ["top", "height", "left", "width", "block_num", "par_num", "line_num"]:
-            if col in data.columns:
-                data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0)
+    candidates = [v for v in candidates if abs(v) < 1_000_000]
+    if not candidates:
+        return joined, 0.0
 
-        group_cols = [c for c in ["block_num", "par_num", "line_num"] if c in data.columns]
-        grouped = data.groupby(group_cols, sort=False) if group_cols else [(None, data)]
+    # O mesmo valor costuma aparecer repetido em vários modos; usa o mais frequente.
+    rounded = [round(v, 2) for v in candidates]
+    value = max(set(rounded), key=rounded.count)
+    return joined, float(value)
 
-        for _, group in grouped:
-            group = group.sort_values("left")
-            line_text = " ".join(str(t) for t in group["text"] if str(t).strip())
-            y = int((group["top"] + group["height"] / 2).median())
-            if not (min_y <= y <= max_y):
-                continue
 
-            compact = _norm_name(line_text)
-            token_texts = [_norm_name(t) for t in group["text"]]
-            score = 0.0
-            for target in targets:
-                score = max(score, _name_similarity(compact, target))
-                for token in token_texts:
-                    score = max(score, _name_similarity(token, target))
+def _find_agent_row(structure: dict, aliases: list[str]) -> tuple[dict | None, float]:
+    targets = [_norm_name(a) for a in aliases if _norm_name(a)]
+    best_row = None
+    best_score = 0.0
 
-            if score >= 0.48:
-                candidates.append((score, y, line_text))
+    for row in structure.get("data_rows", []):
+        full_score = max((_name_similarity(row["text"], target) for target in targets), default=0.0)
+        token_score = 0.0
+        for token in row["tokens"]:
+            token_score = max(
+                token_score,
+                max((_name_similarity(str(token["text"]), target) for target in targets), default=0.0),
+            )
+        score = max(full_score, token_score)
+        if score > best_score:
+            best_score = score
+            best_row = row
 
-    if candidates:
-        candidates.sort(
-            key=lambda item: (item[0], -abs(item[1] - img.height * 0.52)),
-            reverse=True,
-        )
-        return candidates[0][1]
+    if best_score < 0.45:
+        return None, best_score
+    return best_row, best_score
 
-    full = ocr_image(img, psm=6)
-    lines = [ln for ln in full.splitlines() if ln.strip()]
+
+def _row_vertical_bounds(structure: dict, target_row: dict, img_height: int) -> tuple[int, int]:
+    rows = structure.get("data_rows", [])
+    idx = rows.index(target_row)
+    current_y = float(target_row["y"])
+
+    if idx > 0:
+        top = int((float(rows[idx - 1]["y"]) + current_y) / 2)
+    else:
+        header_y = float(structure["header"]["y"])
+        top = int((header_y + current_y) / 2)
+
+    if idx < len(rows) - 1:
+        bottom = int((current_y + float(rows[idx + 1]["y"])) / 2)
+    else:
+        row_h = max(18.0, float(target_row["bottom"] - target_row["top"]))
+        bottom = int(min(img_height, current_y + row_h * 1.2))
+
+    return max(0, top), min(img_height, bottom)
+
+
+
+def _merge_close_positions(values: list[float], tolerance: float = 4.0) -> list[int]:
+    if not values:
+        return []
+    values = sorted(float(v) for v in values)
+    groups = [[values[0]]]
+    for value in values[1:]:
+        if value - groups[-1][-1] <= tolerance:
+            groups[-1].append(value)
+        else:
+            groups.append([value])
+    return [int(round(sum(group) / len(group))) for group in groups]
+
+
+def _detect_table_grid(img: Image.Image) -> dict:
+    """Detecta automaticamente as linhas da grade da tabela na imagem inteira."""
+    if not CV2_OK:
+        return {"ok": False, "reason": "OpenCV indisponível."}
+
+    rgb = np.array(img.convert("RGB"))
+    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
+    binary = cv2.threshold(gray, 185, 255, cv2.THRESH_BINARY_INV)[1]
+    height, width = gray.shape
+
+    horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (max(30, width // 15), 1))
+    vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, max(15, height // 8)))
+    horizontal = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
+    vertical = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
+
+    h_contours, _ = cv2.findContours(horizontal, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    v_contours, _ = cv2.findContours(vertical, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    h_positions = []
+    h_segments = []
+    for contour in h_contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if w >= width * 0.38 and h <= max(8, height * 0.025):
+            h_positions.append(y + h / 2)
+            h_segments.append((x, y, w, h))
+
+    v_positions = []
+    for contour in v_contours:
+        x, y, w, h = cv2.boundingRect(contour)
+        if h >= height * 0.30 and w <= max(8, width * 0.01):
+            v_positions.append(x + w / 2)
+
+    ys = _merge_close_positions(h_positions, tolerance=max(3.0, height * 0.008))
+    xs = _merge_close_positions(v_positions, tolerance=max(3.0, width * 0.004))
+
+    # A borda esquerda às vezes encosta no limite da imagem e não vira contorno vertical.
+    if h_segments:
+        table_left = min(seg[0] for seg in h_segments)
+        table_right = max(seg[0] + seg[2] for seg in h_segments)
+        if not xs or abs(xs[0] - table_left) > width * 0.03:
+            xs.insert(0, int(table_left))
+        if abs(xs[-1] - table_right) > width * 0.03:
+            xs.append(int(table_right))
+
+    xs = sorted(set(max(0, min(width - 1, int(x))) for x in xs))
+    ys = sorted(set(max(0, min(height - 1, int(y))) for y in ys))
+
+    if len(xs) < 4 or len(ys) < 3:
+        return {
+            "ok": False,
+            "reason": f"Grade insuficiente: {len(xs)} linhas verticais e {len(ys)} horizontais.",
+            "xs": xs,
+            "ys": ys,
+        }
+
+    return {"ok": True, "xs": xs, "ys": ys}
+
+
+def _ocr_cell_text(img: Image.Image, box: tuple[int, int, int, int], numeric: bool = False) -> str:
+    x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        return ""
+    mx = max(2, int((x2 - x1) * 0.02))
+    my = max(1, int((y2 - y1) * 0.06))
+    crop = img.crop((x1 + mx, y1 + my, x2 - mx, y2 - my))
+    scale = 6 if numeric else 4
+    crop = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)))
+
+    gray = ImageOps.autocontrast(crop.convert("L"))
+    threshold = gray.point(lambda p: 255 if p > 170 else 0)
+    variants = [crop, threshold, gray]
+    configs = []
+    if numeric:
+        configs = [
+            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
+            "--oem 3 --psm 13 -c tessedit_char_whitelist=0123456789.,-",
+            "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,-",
+        ]
+    else:
+        configs = ["--oem 3 --psm 7", "--oem 3 --psm 6", "--oem 3 --psm 11"]
+
+    best = ""
+    for variant in variants:
+        for config in configs:
+            try:
+                text = pytesseract.image_to_string(variant, lang="eng", config=config).strip()
+            except Exception:
+                text = ""
+            if text:
+                if numeric and extract_all_money_misto(text):
+                    return text
+                if not numeric:
+                    return text
+                if len(text) > len(best):
+                    best = text
+    return best
+
+
+def _header_matches(text: str, aliases: list[str], threshold: float = 0.72) -> bool:
+    candidate = _norm_name(text)
+    if not candidate:
+        return False
+    for alias in aliases:
+        target = _norm_name(alias)
+        if candidate == target or (len(target) >= 4 and target in candidate):
+            return True
+        if len(candidate) >= max(3, len(target) - 2) and _name_similarity(candidate, target) >= threshold:
+            return True
+    return False
+
+
+def _read_table_by_grid(img: Image.Image) -> dict:
+    """Lê a tabela célula a célula depois de detectar sua grade dinamicamente."""
+    grid = _detect_table_grid(img)
+    if not grid.get("ok"):
+        return {"ok": False, "reason": grid.get("reason", "Grade não detectada."), "grid": grid}
+
+    xs = grid["xs"]
+    ys = grid["ys"]
+    matrix = []
+    for r in range(len(ys) - 1):
+        row = []
+        for c in range(len(xs) - 1):
+            box = (xs[c], ys[r], xs[c + 1], ys[r + 1])
+            row.append({"box": box, "text": _ocr_cell_text(img, box, numeric=False)})
+        matrix.append(row)
+
+    header_index = None
+    header_map = {}
+    for r, row in enumerate(matrix):
+        local = {}
+        for c, cell in enumerate(row):
+            text = cell["text"]
+            if _header_matches(text, ["rake"], threshold=0.78):
+                local["rake"] = c
+            if _header_matches(text, ["ganhos", "ganho"], threshold=0.72):
+                local["ganhos"] = c
+            if _header_matches(text, ["super agente", "agente"], threshold=0.68):
+                local["agente"] = c
+        if "rake" in local and "ganhos" in local:
+            header_index = r
+            header_map = local
+            break
+
+    if header_index is None:
+        return {
+            "ok": False,
+            "reason": "Cabeçalho RAKE/GANHOS não identificado nas células da grade.",
+            "grid": grid,
+            "matrix": matrix,
+        }
+
+    if "agente" not in header_map:
+        header_map["agente"] = 0
+
+    data_rows = []
+    for r in range(header_index + 1, len(matrix)):
+        row = matrix[r]
+        agent_col = header_map["agente"]
+        if agent_col >= len(row):
+            continue
+        agent_text = row[agent_col]["text"].strip()
+        norm = _norm_name(agent_text)
+        if not norm or any(key in norm for key in ["total", "adiantamento"]):
+            continue
+
+        rake_cell = row[header_map["rake"]]
+        ganhos_cell = row[header_map["ganhos"]]
+        rake_text = _ocr_cell_text(img, rake_cell["box"], numeric=True)
+        ganhos_text = _ocr_cell_text(img, ganhos_cell["box"], numeric=True)
+        rake_vals = extract_all_money_misto(rake_text)
+        ganhos_vals = extract_all_money_misto(ganhos_text)
+        data_rows.append({
+            "row_index": r,
+            "agente": agent_text,
+            "rake": rake_vals[0] if rake_vals else 0.0,
+            "ganhos": ganhos_vals[0] if ganhos_vals else 0.0,
+            "rake_text": rake_text,
+            "ganhos_text": ganhos_text,
+            "rake_box": rake_cell["box"],
+            "ganhos_box": ganhos_cell["box"],
+        })
+
+    return {
+        "ok": True,
+        "grid": grid,
+        "header_index": header_index,
+        "header_map": header_map,
+        "rows": data_rows,
+    }
+
+
+def _find_agent_in_grid(table: dict, aliases: list[str]) -> tuple[dict | None, float]:
+    targets = [_norm_name(alias) for alias in aliases if _norm_name(alias)]
     best = None
-    for i, line in enumerate(lines):
-        estimated_y = int(img.height * (0.30 + 0.52 * (i / max(1, len(lines) - 1))))
-        score = max((_name_similarity(line, target) for target in targets), default=0.0)
-        if score >= 0.48 and (best is None or score > best[0]):
-            best = (score, estimated_y)
+    best_score = 0.0
+    for row in table.get("rows", []):
+        score = max((_name_similarity(row["agente"], target) for target in targets), default=0.0)
+        if score > best_score:
+            best = row
+            best_score = score
+    if best_score < 0.45:
+        return None, best_score
+    return best, best_score
 
-    return best[1] if best else None
+def _extract_agent_by_headers(img: Image.Image, aliases, display_name: str) -> dict:
+    """Lê RAKE e GANHOS da linha do agente sem usar coordenadas fixas.
 
-def ocr_row_value(img: Image.Image, y_center: int, x1: float, x2: float) -> tuple[str, float]:
-    h = img.height
-    band = max(28, int(h * 0.045))
-    box = (int(img.width * x1), max(0, y_center - band), int(img.width * x2), min(h, y_center + band))
-    crop = img.crop(box).resize((max(1, int((box[2]-box[0]) * 4)), max(1, int((box[3]-box[1]) * 4))))
-    txt = "\n".join([ocr_image(crop, psm=7), ocr_image(crop, psm=6), ocr_image(crop, psm=11)])
-    vals = [v for v in extract_all_money_misto(txt) if abs(v) < 1000000]
-    return txt, (vals[0] if vals else 0.0)
+    A imagem inteira é analisada. Os cabeçalhos definem as posições das colunas,
+    e o nome do agente define a linha, portanto a ordem das linhas e a largura das
+    colunas podem mudar.
+    """
+    structure = _detect_table_structure(img)
+    if not structure.get("ok"):
+        return {
+            "found": False,
+            "agente": display_name,
+            "ganhos": 0.0,
+            "rake": 0.0,
+            "ocr_text": structure.get("reason", "Estrutura da tabela não identificada."),
+        }
 
+    row, score = _find_agent_row(structure, list(aliases))
+    if row is None:
+        visible_rows = "\n".join(f"- {r['text']}" for r in structure.get("data_rows", []))
+        return {
+            "found": False,
+            "agente": display_name,
+            "ganhos": 0.0,
+            "rake": 0.0,
+            "ocr_text": f"Agente não localizado. Melhor similaridade: {score:.2f}\n\nLinhas detectadas:\n{visible_rows}",
+        }
 
-def extract_agent_from_adamantium_table(img: Image.Image, aliases, display_name: str) -> dict:
-    y = find_agent_y(img, aliases)
-    if y is None:
-        return {"found": False, "agente": display_name, "ganhos": 0.0, "rake": 0.0, "ocr_text": "Agente não localizado."}
+    y1, y2 = _row_vertical_bounds(structure, row, img.height)
+    rake_left, rake_right = structure["bounds"]["rake"]
+    ganhos_left, ganhos_right = structure["bounds"]["ganhos"]
 
-    # Layout observado: SUPER AGENTE | Rake | -25% | Ganhos | Resultado
-    rake_txt, rake = ocr_row_value(img, y, 0.30, 0.46)
-    ganhos_txt, ganhos = ocr_row_value(img, y, 0.57, 0.74)
+    rake_box = (int(rake_left), y1, int(rake_right), y2)
+    ganhos_box = (int(ganhos_left), y1, int(ganhos_right), y2)
+
+    rake_txt, rake = _numeric_ocr_from_cell(img, rake_box)
+    ganhos_txt, ganhos = _numeric_ocr_from_cell(img, ganhos_box)
+
+    centers_txt = ", ".join(f"{k}={v:.1f}" for k, v in sorted(structure["centers"].items(), key=lambda item: item[1]))
     return {
         "found": True,
         "agente": display_name,
         "ganhos": ganhos,
         "rake": rake,
-        "ocr_text": f"Y localizado: {y}\n\nOCR RAKE:\n{rake_txt}\n\nOCR GANHOS:\n{ganhos_txt}",
+        "ocr_text": (
+            f"Linha localizada: {row['text']}\n"
+            f"Similaridade: {score:.2f}\n"
+            f"Y da linha: {row['y']:.1f}\n"
+            f"Cabeçalhos/centros detectados: {centers_txt}\n"
+            f"Recorte RAKE: {rake_box}\n"
+            f"OCR RAKE:\n{rake_txt}\n"
+            f"RAKE FINAL: {rake}\n\n"
+            f"Recorte GANHOS: {ganhos_box}\n"
+            f"OCR GANHOS:\n{ganhos_txt}\n"
+            f"GANHOS FINAL: {ganhos}"
+        ),
     }
+
+
+def extract_agent_from_adamantium_table(img: Image.Image, aliases, display_name: str) -> dict:
+    """Lê a imagem inteira, detecta a grade e identifica a linha pelo nome do agente.
+
+    Primeiro tenta a leitura estrutural da tabela por linhas/colunas detectadas.
+    Se a grade não for reconhecida, usa o OCR por cabeçalhos como fallback.
+    """
+    table = _read_table_by_grid(img)
+    if table.get("ok"):
+        row, score = _find_agent_in_grid(table, list(aliases))
+        if row is not None:
+            detected_rows = "\n".join(
+                f"- {item['agente']}: RAKE={item['rake']} | GANHOS={item['ganhos']}"
+                for item in table.get("rows", [])
+            )
+            return {
+                "found": True,
+                "agente": display_name,
+                "ganhos": float(row["ganhos"]),
+                "rake": float(row["rake"]),
+                "ocr_text": (
+                    "MÉTODO: leitura dinâmica pela grade da tabela inteira\n"
+                    f"Linhas verticais detectadas: {table['grid']['xs']}\n"
+                    f"Linhas horizontais detectadas: {table['grid']['ys']}\n"
+                    f"Colunas identificadas: {table['header_map']}\n"
+                    f"Agente reconhecido: {row['agente']}\n"
+                    f"Similaridade: {score:.2f}\n"
+                    f"Recorte RAKE: {row['rake_box']}\n"
+                    f"OCR RAKE: {row['rake_text']}\n"
+                    f"RAKE FINAL: {row['rake']}\n"
+                    f"Recorte GANHOS: {row['ganhos_box']}\n"
+                    f"OCR GANHOS: {row['ganhos_text']}\n"
+                    f"GANHOS FINAL: {row['ganhos']}\n\n"
+                    f"Linhas reconhecidas:\n{detected_rows}"
+                ),
+            }
+
+    fallback = _extract_agent_by_headers(img, aliases, display_name)
+    grid_reason = table.get("reason", "Agente não encontrado na grade.")
+    fallback["ocr_text"] = (
+        f"A leitura pela grade não foi concluída: {grid_reason}\n"
+        "Foi usado o fallback por cabeçalhos e coordenadas detectadas.\n\n"
+        + fallback.get("ocr_text", "")
+    )
+    return fallback
 
 
 def extract_suprema_total(img: Image.Image) -> dict:
