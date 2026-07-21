@@ -1,19 +1,12 @@
 # ============================================================
-# FECHAMENTOS PREMIER - APP FINAL CORRIGIDO
-# Alterações incluídas:
-# - Oscar: TOTAL de cada agente = apenas rakeback
-#   TOTAL = RAKE * %RB
-#   Ganhos não entram no total do Oscar.
-#
-# - Demetra / Killuminatti:
-#   leitura da tabela por colunas.
-#   Soma todos os valores da coluna RAKE.
-#   Soma todos os valores da coluna GANHOS.
-#   Ignora -25%, Resultado, Adiantamento e Total.
+# FECHAMENTOS PREMIER
+# Versão consolidada: Alex, Oscar, Demetra e Strong.
+# OCR das tabelas por nome do agente, sem depender da ordem das linhas.
 # ============================================================
 
 import io
 import re
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import pandas as pd
@@ -33,7 +26,6 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 # =========================
 # CONFIGURAÇÕES
 # =========================
-RB_HARNEFER = 70.0
 RB_DEMETRA_PLANILHA = 70.0
 RB_DEMETRA_IMAGEM = 70.0
 REBATE_DEMETRA = -5.0
@@ -71,7 +63,7 @@ MAPA_IDS_PDF = {
     "13489882": {"cliente": "Oscar", "rb": 65.0},
     "3891202": {"cliente": "Oscar", "rb": 65.0},
     "4085350": {"cliente": "Oscar", "rb": 45.0},
-    "13696313": {"cliente": "Demetra", "rb": 55.0},
+    "13696313": {"cliente": "Oscar", "rb": 55.0},
     "0": {"cliente": "Oscar", "rb": 40.0},
 }
 
@@ -284,39 +276,6 @@ def ocr_crop_value(img: Image.Image, box) -> tuple[str, float]:
             return txt, v
     return txt, 0.0
 
-
-# =========================
-# HARNEFER
-# =========================
-def detect_harnefer_image(img: Image.Image) -> bool:
-    text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
-    return ("TOTAL FEE" in text and "WINNINGS" in text) or ("GAMES" in text and "ADMIN FEE" in text)
-
-
-def crop_harnefer_summary(img: Image.Image) -> Image.Image:
-    w, h = img.size
-    return img.crop((int(w * 0.08), int(h * 0.32), int(w * 0.93), int(h * 0.64)))
-
-
-def extract_harnefer_values(img: Image.Image) -> dict:
-    crop = crop_harnefer_summary(img)
-    w, h = crop.size
-    col_w = w // 4
-    cols = [crop.crop((i * col_w, 0, (i + 1) * col_w if i < 3 else w, h)) for i in range(4)]
-    texts = [ocr_image(c, psm=6) + "\n" + ocr_image(c, psm=11) for c in cols]
-    rake = first_money(texts[1])
-    ganhos = first_money(texts[3])
-    rakeback = rake * (RB_HARNEFER / 100.0)
-    total = ganhos + rakeback
-    return {
-        "ganhos": ganhos,
-        "rake": rake,
-        "rakeback": rakeback,
-        "total_final": total,
-        "ocr_fee": texts[1],
-        "ocr_winnings": texts[3],
-        "crop": crop,
-    }
 
 
 # =========================
@@ -723,26 +682,84 @@ def _norm_name(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-def find_agent_y(img: Image.Image, aliases) -> int | None:
-    """Localiza verticalmente um agente pelo texto, sem depender da ordem da tabela."""
-    data = _ocr_data(img)
-    targets = [_norm_name(a) for a in aliases]
-    if data is not None and not data.empty:
-        data = data.dropna(subset=["text"])
-        for _, row in data.iterrows():
-            token = _norm_name(row.get("text", ""))
-            if token and any(t in token or token in t for t in targets if len(t) >= 4):
-                return int(row["top"] + row["height"] / 2)
+def _name_similarity(candidate: str, target: str) -> float:
+    """Pontuação tolerante a falhas comuns do OCR em nomes."""
+    candidate = _norm_name(candidate)
+    target = _norm_name(target)
+    if not candidate or not target:
+        return 0.0
+    if candidate == target:
+        return 1.0
+    if candidate in target or target in candidate:
+        return 0.92
 
-    # fallback por linhas OCR; estima o centro da linha pela posição no texto
+    prefix = 0
+    for a, b in zip(candidate, target):
+        if a != b:
+            break
+        prefix += 1
+
+    prefix_score = min(prefix / max(4, min(len(candidate), len(target))), 1.0)
+    seq_score = SequenceMatcher(None, candidate, target).ratio()
+    return max(seq_score, 0.75 * prefix_score)
+
+
+def find_agent_y(img: Image.Image, aliases) -> int | None:
+    """Localiza a linha do agente sem depender da ordem.
+
+    A faixa de título/cabeçalho é ignorada para não confundir, por exemplo,
+    o título "Killuminatti 25%" com a linha real do agente.
+    """
+    data = _ocr_data(img)
+    targets = [_norm_name(a) for a in aliases if _norm_name(a)]
+    min_y = int(img.height * 0.30)
+    max_y = int(img.height * 0.82)
+    candidates = []
+
+    if data is not None and not data.empty:
+        data = data.dropna(subset=["text"]).copy()
+        for col in ["top", "height", "left", "width", "block_num", "par_num", "line_num"]:
+            if col in data.columns:
+                data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0)
+
+        group_cols = [c for c in ["block_num", "par_num", "line_num"] if c in data.columns]
+        grouped = data.groupby(group_cols, sort=False) if group_cols else [(None, data)]
+
+        for _, group in grouped:
+            group = group.sort_values("left")
+            line_text = " ".join(str(t) for t in group["text"] if str(t).strip())
+            y = int((group["top"] + group["height"] / 2).median())
+            if not (min_y <= y <= max_y):
+                continue
+
+            compact = _norm_name(line_text)
+            token_texts = [_norm_name(t) for t in group["text"]]
+            score = 0.0
+            for target in targets:
+                score = max(score, _name_similarity(compact, target))
+                for token in token_texts:
+                    score = max(score, _name_similarity(token, target))
+
+            if score >= 0.48:
+                candidates.append((score, y, line_text))
+
+    if candidates:
+        candidates.sort(
+            key=lambda item: (item[0], -abs(item[1] - img.height * 0.52)),
+            reverse=True,
+        )
+        return candidates[0][1]
+
     full = ocr_image(img, psm=6)
     lines = [ln for ln in full.splitlines() if ln.strip()]
+    best = None
     for i, line in enumerate(lines):
-        nline = _norm_name(line)
-        if any(t in nline for t in targets):
-            return int(img.height * (0.25 + 0.55 * (i / max(1, len(lines) - 1))))
-    return None
+        estimated_y = int(img.height * (0.30 + 0.52 * (i / max(1, len(lines) - 1))))
+        score = max((_name_similarity(line, target) for target in targets), default=0.0)
+        if score >= 0.48 and (best is None or score > best[0]):
+            best = (score, estimated_y)
 
+    return best[1] if best else None
 
 def ocr_row_value(img: Image.Image, y_center: int, x1: float, x2: float) -> tuple[str, float]:
     h = img.height
@@ -861,9 +878,6 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     return img
 
 
-def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
-    rb = rake * (RB_HARNEFER / 100.0)
-    return generate_summary_report("HARNEFER", periodo, ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"], [ganhos, rake, rb, ganhos+rb], 0, ganhos+rb)
 
 
 def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float,
@@ -939,19 +953,6 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 # =========================
 # PÁGINAS
 # =========================
-def page_harnefer():
-    st.subheader("Harnefer")
-    periodo=st.text_input("Período do fechamento",key="periodo_harnefer",placeholder="13/04/2026 a 19/04/2026")
-    arquivo=st.file_uploader("Envie a imagem do Harnefer",type=["png","jpg","jpeg","webp"],key="harnefer_img")
-    if not TESSERACT_OK:
-        st.error("OCR indisponível: instale `pytesseract` e `tesseract-ocr`."); return
-    if arquivo and st.button("Ler imagem e gerar fechamento",type="primary",key="btn_harnefer"):
-        img=Image.open(arquivo)
-        if not detect_harnefer_image(img): st.warning("Não identifiquei a imagem do Harnefer com segurança."); return
-        dados=extract_harnefer_values(img)
-        report=generate_harnefer_report(periodo.strip() or "-",dados["ganhos"],dados["rake"])
-        st.image(report,caption="Relatório final",use_container_width=True)
-        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="harnefer_fechamento.png",mime="image/png")
 
 
 def page_alex():
@@ -1053,9 +1054,12 @@ def page_strong():
 
 
 st.title("Fechamentos Premier")
-cliente=st.selectbox("Escolha o cliente",["Harnefer","Demetra","Oscar","Alex","Strong"])
-if cliente=="Harnefer": page_harnefer()
-elif cliente=="Demetra": page_demetra()
-elif cliente=="Oscar": page_oscar()
-elif cliente=="Alex": page_alex()
-else: page_strong()
+cliente = st.selectbox("Escolha o cliente", ["Demetra", "Oscar", "Alex", "Strong"])
+if cliente == "Demetra":
+    page_demetra()
+elif cliente == "Oscar":
+    page_oscar()
+elif cliente == "Alex":
+    page_alex()
+else:
+    page_strong()
