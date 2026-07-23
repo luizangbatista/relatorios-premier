@@ -73,6 +73,7 @@ MAPA_IDS_PDF = {
     "3891202": {"cliente": "Oscar", "rb": 65.0},
     "4085350": {"cliente": "Oscar", "rb": 45.0},
     "13696313": {"cliente": "Demetra", "rb": 60.0},
+    "4197134": {"cliente": "Oscar", "rb": 40.0},
     "0": {"cliente": "Oscar", "rb": 40.0},
 }
 
