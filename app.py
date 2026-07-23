@@ -1505,7 +1505,7 @@ def page_oscar():
     if pdf is not None:
         for _,r in process_pdf_by_client(pdf,"Oscar").iterrows():
             row=base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"],rebate=r["rebate"])
-            row["TOTAL"]=row["GANHOS"]+row["RB"]+row["REBATE"]
+            row["TOTAL"]=row["RB"]+row["REBATE"]
             rows.append(row)
     if st.button("Gerar fechamento Oscar",type="primary",key="btn_oscar"):
         if not rows: st.warning("Envie o PDF do Oscar."); return
