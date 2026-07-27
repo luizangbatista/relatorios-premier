@@ -1444,7 +1444,7 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
         y+=rh
 
     total_base = total_geral if total_base_exibido is None else total_base_exibido
-    summary = [("SUBTOTAL" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
+    summary = [("TOTAL PPPoker" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
     for idx,(label,value,bg,label_color) in enumerate(summary):
             draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
             label_end=xs[-2]
