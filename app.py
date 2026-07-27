@@ -641,7 +641,7 @@ def extract_pdf_lines(uploaded_file):
 def process_pdf_by_client(uploaded_file, cliente_alvo: str):
     """Lê linhas do PDF e aplica o RB% cadastrado no MAPA_IDS_PDF.
 
-    Para Oscar, também captura a terceira coluna monetária como REBATE.
+    Para Oscar e Demetra, também captura a terceira coluna monetária como REBATE.
     O RAKEBACK presente no PDF nunca é usado como percentual.
     """
     rows = []
@@ -662,7 +662,7 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
 
         ganhos = parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
-        rebate = parse_money(money_matches[2]) if cliente_alvo == "Oscar" and len(money_matches) >= 3 else 0.0
+        rebate = parse_money(money_matches[2]) if cliente_alvo in {"Oscar", "Demetra"} and len(money_matches) >= 3 else 0.0
         agente = re.sub(r"\s{2,}", " ", line[:id_match.start()].strip())
         rows.append({
             "agente": agente,
@@ -1524,7 +1524,15 @@ def page_demetra():
     rows=[]
     if pdf is not None:
         for _,r in process_pdf_by_client(pdf,"Demetra").iterrows():
-            rows.append(base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"]))
+            row=base_row(
+                r["agente"],
+                r["ganhos"],
+                r["rake"],
+                r["rb_percentual"],
+                rebate=r["rebate"],
+            )
+            row["TOTAL"]=row["GANHOS"]+row["RB"]+row["REBATE"]
+            rows.append(row)
     if imagem is not None:
         img=Image.open(imagem)
         dados=extract_agent_from_adamantium_table(img,["Killuminatti","KILLUMINATTI"],"Killuminatti")
@@ -1535,7 +1543,7 @@ def page_demetra():
             rows.append(base_row("Killuminatti",dados["ganhos"],dados["rake"],70.0))
     if st.button("Gerar fechamento Demetra",type="primary",key="btn_demetra"):
         if not rows: st.warning("Envie o PDF e/ou a imagem Killuminatti."); return
-        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
+        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","REBATE","TOTAL"]]
         subtotal=float(df["TOTAL"].sum())
         rebate=subtotal*(REBATE_DEMETRA/100.0) if subtotal>0 else 0.0
         total=subtotal+rebate
