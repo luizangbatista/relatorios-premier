@@ -1501,15 +1501,7 @@ def page_alex():
         st.image(report,caption="Pronto para print",use_container_width=True)
         st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="alex_fechamento.png",mime="image/png")
 
-        subtotal=float(df["TOTAL"].sum())
-        rebate=subtotal*(REBATE_DEMETRA/100.0) if subtotal>0 else 0.0
-        total=subtotal+rebate
-        adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
-        report=generate_client_table_image("DEMETRA",periodo.strip() or "-",df,total,adjustments,subtotal)
-        st.image(report,caption="Pronto para print",use_container_width=True)
-        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="demetra_fechamento.png",mime="image/png")
-
-
+       
 def page_oscar():
     st.subheader("Oscar")
     periodo=st.text_input("Período do fechamento",key="periodo_oscar",placeholder="06/04/2026 a 12/04/2026")
