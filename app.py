@@ -1494,7 +1494,7 @@ def page_alex():
         if not rows: st.warning("Envie o PDF do Alex."); return
         df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
         subtotal=float(df["TOTAL"].sum())
-        rebate=subtotal*(REBATE_ALEX/100.0)
+        rebate=subtotal*(REBATE_ALEX_POSITIVO/100.0)
         total=subtotal+rebate
         adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
         report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total,adjustments,subtotal)
