@@ -1,27 +1,25 @@
 # ============================================================
-# FECHAMENTOS PREMIER
-# Versão consolidada: Alex, Oscar, Demetra e Strong.
-# OCR das tabelas por nome do agente, sem depender da ordem das linhas.
+# FECHAMENTOS PREMIER - APP FINAL CORRIGIDO
+# Alterações incluídas:
+# - Oscar: TOTAL de cada agente = apenas rakeback
+#   TOTAL = RAKE * %RB
+#   Ganhos não entram no total do Oscar.
+#
+# - Demetra / Killuminatti:
+#   leitura da tabela por colunas.
+#   Soma todos os valores da coluna RAKE.
+#   Soma todos os valores da coluna GANHOS.
+#   Ignora -25%, Resultado, Adiantamento e Total.
 # ============================================================
 
 import io
 import re
-from difflib import SequenceMatcher
 from pathlib import Path
 
 import pandas as pd
 import pdfplumber
 import streamlit as st
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
-
-try:
-    import cv2
-    import numpy as np
-    CV2_OK = True
-except Exception:
-    cv2 = None
-    np = None
-    CV2_OK = False
 
 try:
     import pytesseract
@@ -35,6 +33,7 @@ st.set_page_config(page_title="Fechamentos Premier", layout="wide")
 # =========================
 # CONFIGURAÇÕES
 # =========================
+RB_HARNEFER = 70.0
 RB_DEMETRA_PLANILHA = 70.0
 RB_DEMETRA_IMAGEM = 70.0
 REBATE_DEMETRA = -5.0
@@ -72,10 +71,7 @@ MAPA_IDS_PDF = {
     "13489882": {"cliente": "Oscar", "rb": 65.0},
     "3891202": {"cliente": "Oscar", "rb": 65.0},
     "4085350": {"cliente": "Oscar", "rb": 45.0},
-    "13696313": {"cliente": "Demetra", "rb": 60.0},
-    "4192333": {"cliente": "Demetra", "rb": 50.0},
-    "13708200": {"cliente": "Demetra", "rb": 60.0},
-    "4197134": {"cliente": "Oscar", "rb": 40.0},
+    "13696313": {"cliente": "Oscar", "rb": 55.0},
     "0": {"cliente": "Oscar", "rb": 40.0},
 }
 
@@ -288,6 +284,39 @@ def ocr_crop_value(img: Image.Image, box) -> tuple[str, float]:
             return txt, v
     return txt, 0.0
 
+
+# =========================
+# HARNEFER
+# =========================
+def detect_harnefer_image(img: Image.Image) -> bool:
+    text = (ocr_image(img, psm=6) + "\n" + ocr_image(img, psm=11)).upper()
+    return ("TOTAL FEE" in text and "WINNINGS" in text) or ("GAMES" in text and "ADMIN FEE" in text)
+
+
+def crop_harnefer_summary(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    return img.crop((int(w * 0.08), int(h * 0.32), int(w * 0.93), int(h * 0.64)))
+
+
+def extract_harnefer_values(img: Image.Image) -> dict:
+    crop = crop_harnefer_summary(img)
+    w, h = crop.size
+    col_w = w // 4
+    cols = [crop.crop((i * col_w, 0, (i + 1) * col_w if i < 3 else w, h)) for i in range(4)]
+    texts = [ocr_image(c, psm=6) + "\n" + ocr_image(c, psm=11) for c in cols]
+    rake = first_money(texts[1])
+    ganhos = first_money(texts[3])
+    rakeback = rake * (RB_HARNEFER / 100.0)
+    total = ganhos + rakeback
+    return {
+        "ganhos": ganhos,
+        "rake": rake,
+        "rakeback": rakeback,
+        "total_final": total,
+        "ocr_fee": texts[1],
+        "ocr_winnings": texts[3],
+        "crop": crop,
+    }
 
 
 # =========================
@@ -643,7 +672,7 @@ def extract_pdf_lines(uploaded_file):
 def process_pdf_by_client(uploaded_file, cliente_alvo: str):
     """Lê linhas do PDF e aplica o RB% cadastrado no MAPA_IDS_PDF.
 
-    Para Oscar e Demetra, também captura a terceira coluna monetária como REBATE.
+    Para Oscar, também captura a terceira coluna monetária como REBATE.
     O RAKEBACK presente no PDF nunca é usado como percentual.
     """
     rows = []
@@ -664,7 +693,7 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
 
         ganhos = parse_money(money_matches[0])
         rake = parse_money(money_matches[1])
-        rebate = parse_money(money_matches[2]) if cliente_alvo in {"Oscar", "Demetra"} and len(money_matches) >= 3 else 0.0
+        rebate = parse_money(money_matches[2]) if cliente_alvo == "Oscar" and len(money_matches) >= 3 else 0.0
         agente = re.sub(r"\s{2,}", " ", line[:id_match.start()].strip())
         rows.append({
             "agente": agente,
@@ -678,32 +707,14 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
 
 
 # =========================
-# OCR DINÂMICO DE TABELA
+# OCR POR NOME DE AGENTE
 # =========================
 def _ocr_data(img: Image.Image):
-    """Executa OCR na imagem inteira e preserva as coordenadas de cada token."""
     if not TESSERACT_OK:
         return None
     try:
         proc = preprocess_for_ocr(img)
-        data = pytesseract.image_to_data(
-            proc,
-            lang="eng",
-            config="--oem 3 --psm 6",
-            output_type=pytesseract.Output.DATAFRAME,
-        )
-        if data is None or data.empty:
-            return None
-
-        data = data.dropna(subset=["text"]).copy()
-        data["text"] = data["text"].astype(str).str.strip()
-        data = data[data["text"] != ""].copy()
-        for col in ["left", "top", "width", "height", "conf"]:
-            data[col] = pd.to_numeric(data[col], errors="coerce").fillna(0)
-
-        data["x_center"] = data["left"] + data["width"] / 2
-        data["y_center"] = data["top"] + data["height"] / 2
-        return data
+        return pytesseract.image_to_data(proc, lang="eng", config="--oem 3 --psm 6", output_type=pytesseract.Output.DATAFRAME)
     except Exception:
         return None
 
@@ -712,594 +723,52 @@ def _norm_name(text: str) -> str:
     return re.sub(r"[^a-z0-9]", "", str(text).lower())
 
 
-def _name_similarity(candidate: str, target: str) -> float:
-    """Pontuação tolerante a pequenas falhas do OCR."""
-    candidate = _norm_name(candidate)
-    target = _norm_name(target)
-    if not candidate or not target:
-        return 0.0
-    if candidate == target:
-        return 1.0
-    if candidate in target or target in candidate:
-        return 0.92
-    return SequenceMatcher(None, candidate, target).ratio()
-
-
-def _cluster_ocr_rows(data: pd.DataFrame) -> list[dict]:
-    """Agrupa tokens em linhas usando a posição vertical real, não a ordem do OCR."""
-    if data is None or data.empty:
-        return []
-
-    heights = data.loc[data["height"] > 0, "height"]
-    median_h = float(heights.median()) if not heights.empty else 16.0
-    tolerance = max(7.0, median_h * 0.75)
-
-    tokens = data.sort_values(["y_center", "left"]).to_dict("records")
-    groups: list[list[dict]] = []
-    centers: list[float] = []
-
-    for token in tokens:
-        y = float(token["y_center"])
-        best_idx = None
-        best_dist = None
-        for idx, center in enumerate(centers):
-            dist = abs(y - center)
-            if dist <= tolerance and (best_dist is None or dist < best_dist):
-                best_idx = idx
-                best_dist = dist
-
-        if best_idx is None:
-            groups.append([token])
-            centers.append(y)
-        else:
-            groups[best_idx].append(token)
-            centers[best_idx] = sum(float(t["y_center"]) for t in groups[best_idx]) / len(groups[best_idx])
-
-    rows = []
-    for group in groups:
-        group = sorted(group, key=lambda t: float(t["left"]))
-        text = " ".join(str(t["text"]) for t in group if str(t["text"]).strip())
-        rows.append({
-            "tokens": group,
-            "text": text,
-            "norm": _norm_name(text),
-            "y": sum(float(t["y_center"]) for t in group) / len(group),
-            "top": min(float(t["top"]) for t in group),
-            "bottom": max(float(t["top"] + t["height"]) for t in group),
-        })
-
-    return sorted(rows, key=lambda r: r["y"])
-
-
-def _best_token_center(row: dict, aliases: list[str]) -> tuple[float | None, float]:
-    """Retorna o centro X do token mais semelhante a um cabeçalho."""
-    best_x = None
-    best_score = 0.0
-    for token in row["tokens"]:
-        token_text = str(token["text"])
-        for alias in aliases:
-            score = _name_similarity(token_text, alias)
-            if score > best_score:
-                best_score = score
-                best_x = float(token["x_center"])
-    return best_x, best_score
-
-
-def _detect_table_structure(img: Image.Image) -> dict:
-    """Detecta cabeçalhos, centros de colunas e linhas da tabela inteira."""
+def find_agent_y(img: Image.Image, aliases) -> int | None:
+    """Localiza verticalmente um agente pelo texto, sem depender da ordem da tabela."""
     data = _ocr_data(img)
-    rows = _cluster_ocr_rows(data) if data is not None else []
-    if not rows:
-        return {"ok": False, "reason": "OCR não encontrou linhas na imagem.", "rows": []}
-
-    header = None
-    header_score = 0.0
-    for row in rows:
-        rake_x, rake_score = _best_token_center(row, ["rake"])
-        ganhos_x, ganhos_score = _best_token_center(row, ["ganhos", "ganho"])
-        score = rake_score + ganhos_score
-        if rake_x is not None and ganhos_x is not None and score > header_score:
-            header = row
-            header_score = score
-
-    if header is None:
-        return {"ok": False, "reason": "Cabeçalhos RAKE e GANHOS não foram localizados.", "rows": rows}
-
-    header_aliases = {
-        "agente": ["super", "agente"],
-        "rake": ["rake"],
-        "desconto": ["25", "-25", "25%"],
-        "ganhos": ["ganhos", "ganho"],
-        "resultado": ["resultado", "result"] ,
-    }
-
-    centers = {}
-    for name, aliases in header_aliases.items():
-        x, score = _best_token_center(header, aliases)
-        if x is not None and score >= 0.35:
-            centers[name] = x
-
-    if "rake" not in centers or "ganhos" not in centers:
-        return {"ok": False, "reason": "Não foi possível definir as colunas RAKE e GANHOS.", "rows": rows}
-
-    # Cria limites de coluna a partir dos centros detectados no próprio cabeçalho.
-    ordered = sorted((x, name) for name, x in centers.items())
-    bounds = {}
-    for i, (x, name) in enumerate(ordered):
-        left = 0.0 if i == 0 else (ordered[i - 1][0] + x) / 2
-        right = float(img.width) if i == len(ordered) - 1 else (x + ordered[i + 1][0]) / 2
-        bounds[name] = (left, right)
-
-    data_rows = [r for r in rows if r["y"] > header["y"] + max(5.0, (header["bottom"] - header["top"]) * 0.5)]
-    return {
-        "ok": True,
-        "rows": rows,
-        "header": header,
-        "centers": centers,
-        "bounds": bounds,
-        "data_rows": data_rows,
-    }
-
-
-def _numeric_ocr_from_cell(img: Image.Image, box: tuple[int, int, int, int]) -> tuple[str, float]:
-    """Lê uma célula já localizada dinamicamente pelos cabeçalhos e pela linha."""
-    x1, y1, x2, y2 = box
-    if x2 <= x1 or y2 <= y1:
-        return "", 0.0
-
-    # Pequena margem interna para evitar que as linhas da grade prejudiquem o OCR.
-    mx = max(2, int((x2 - x1) * 0.04))
-    my = max(1, int((y2 - y1) * 0.10))
-    x1, x2 = x1 + mx, x2 - mx
-    y1, y2 = y1 + my, y2 - my
-    crop = img.crop((x1, y1, x2, y2))
-    scale = 5
-    crop_big = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)))
-
-    gray = ImageOps.autocontrast(crop_big.convert("L"))
-    threshold = gray.point(lambda p: 255 if p > 170 else 0)
-    variants = [crop_big, gray, threshold]
-    texts = []
-
-    configs = [
-        "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
-        "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,-",
-        "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789.,-",
-    ]
-
-    for variant in variants:
-        for config in configs:
-            try:
-                txt = pytesseract.image_to_string(variant, lang="eng", config=config) or ""
-            except Exception:
-                txt = ""
-            if txt.strip():
-                texts.append(txt.strip())
-
-    joined = "\n".join(texts)
-    candidates = []
-    for txt in texts:
-        candidates.extend(extract_all_money_misto(txt))
-
-    candidates = [v for v in candidates if abs(v) < 1_000_000]
-    if not candidates:
-        return joined, 0.0
-
-    # O mesmo valor costuma aparecer repetido em vários modos; usa o mais frequente.
-    rounded = [round(v, 2) for v in candidates]
-    value = max(set(rounded), key=rounded.count)
-    return joined, float(value)
-
-
-def _find_agent_row(structure: dict, aliases: list[str]) -> tuple[dict | None, float]:
-    targets = [_norm_name(a) for a in aliases if _norm_name(a)]
-    best_row = None
-    best_score = 0.0
-
-    for row in structure.get("data_rows", []):
-        full_score = max((_name_similarity(row["text"], target) for target in targets), default=0.0)
-        token_score = 0.0
-        for token in row["tokens"]:
-            token_score = max(
-                token_score,
-                max((_name_similarity(str(token["text"]), target) for target in targets), default=0.0),
-            )
-        score = max(full_score, token_score)
-        if score > best_score:
-            best_score = score
-            best_row = row
-
-    if best_score < 0.45:
-        return None, best_score
-    return best_row, best_score
-
-
-def _row_vertical_bounds(structure: dict, target_row: dict, img_height: int) -> tuple[int, int]:
-    rows = structure.get("data_rows", [])
-    idx = rows.index(target_row)
-    current_y = float(target_row["y"])
-
-    if idx > 0:
-        top = int((float(rows[idx - 1]["y"]) + current_y) / 2)
-    else:
-        header_y = float(structure["header"]["y"])
-        top = int((header_y + current_y) / 2)
-
-    if idx < len(rows) - 1:
-        bottom = int((current_y + float(rows[idx + 1]["y"])) / 2)
-    else:
-        row_h = max(18.0, float(target_row["bottom"] - target_row["top"]))
-        bottom = int(min(img_height, current_y + row_h * 1.2))
-
-    return max(0, top), min(img_height, bottom)
-
-
-
-def _merge_close_positions(values: list[float], tolerance: float = 4.0) -> list[int]:
-    if not values:
-        return []
-    values = sorted(float(v) for v in values)
-    groups = [[values[0]]]
-    for value in values[1:]:
-        if value - groups[-1][-1] <= tolerance:
-            groups[-1].append(value)
-        else:
-            groups.append([value])
-    return [int(round(sum(group) / len(group))) for group in groups]
-
-
-def _detect_table_grid(img: Image.Image) -> dict:
-    """Detecta a grade da tabela na imagem inteira sem exigir OpenCV.
-
-    Usa projeções de pixels escuros para localizar linhas horizontais e
-    verticais. Isso mantém a leitura dinâmica e evita depender de recortes
-    proporcionais ou da instalação do OpenCV.
-    """
-    try:
-        import numpy as _np
-    except Exception:
-        return {"ok": False, "reason": "NumPy indisponível para detectar a grade."}
-
-    gray = _np.array(ImageOps.autocontrast(img.convert("L")))
-    height, width = gray.shape
-
-    # Linhas da grade são escuras e longas. O limiar é deliberadamente
-    # tolerante para funcionar com capturas redimensionadas ou comprimidas.
-    dark = gray < 175
-
-    horizontal_score = dark.sum(axis=1)
-    horizontal_candidates = _np.where(horizontal_score >= width * 0.34)[0].tolist()
-    ys = _merge_close_positions(horizontal_candidates, tolerance=max(2.0, height * 0.006))
-
-    # Remove linhas muito próximas das bordas e conserva a sequência mais
-    # coerente da região da tabela.
-    ys = [y for y in ys if int(height * 0.08) <= y <= int(height * 0.96)]
-    if len(ys) < 3:
-        # Segundo passe mais permissivo para linhas cinza/azuladas.
-        dark2 = gray < 205
-        score2 = dark2.sum(axis=1)
-        candidates2 = _np.where(score2 >= width * 0.48)[0].tolist()
-        ys = _merge_close_positions(candidates2, tolerance=max(2.0, height * 0.006))
-        ys = [y for y in ys if int(height * 0.08) <= y <= int(height * 0.96)]
-
-    if len(ys) < 3:
-        return {
-            "ok": False,
-            "reason": f"Linhas horizontais insuficientes: {len(ys)}.",
-            "xs": [],
-            "ys": ys,
-        }
-
-    table_top = max(0, ys[0] - 2)
-    table_bottom = min(height, ys[-1] + 3)
-    table_h = max(1, table_bottom - table_top)
-
-    vertical_score = dark[table_top:table_bottom, :].sum(axis=0)
-    vertical_candidates = _np.where(vertical_score >= table_h * 0.72)[0].tolist()
-    xs = _merge_close_positions(vertical_candidates, tolerance=max(2.0, width * 0.0035))
-
-    if len(xs) < 4:
-        dark2 = gray < 205
-        vertical_score2 = dark2[table_top:table_bottom, :].sum(axis=0)
-        candidates2 = _np.where(vertical_score2 >= table_h * 0.68)[0].tolist()
-        xs = _merge_close_positions(candidates2, tolerance=max(2.0, width * 0.0035))
-
-    # Estima bordas laterais pela extensão das linhas horizontais quando uma
-    # borda não foi reconhecida como linha vertical contínua.
-    row_band = dark[max(0, ys[0]-2):min(height, ys[-1]+3), :]
-    col_presence = row_band.sum(axis=0)
-    active = _np.where(col_presence > 0)[0]
-    if active.size:
-        left_edge = int(active.min())
-        right_edge = int(active.max())
-        if not xs or abs(xs[0] - left_edge) > width * 0.025:
-            xs.insert(0, left_edge)
-        if not xs or abs(xs[-1] - right_edge) > width * 0.025:
-            xs.append(right_edge)
-
-    xs = sorted(set(max(0, min(width - 1, int(x))) for x in xs))
-    ys = sorted(set(max(0, min(height - 1, int(y))) for y in ys))
-
-    # Elimina divisões espúrias muito estreitas.
-    min_col_w = max(8, int(width * 0.025))
-    filtered_xs = []
-    for x in xs:
-        if not filtered_xs or x - filtered_xs[-1] >= min_col_w:
-            filtered_xs.append(x)
-        else:
-            filtered_xs[-1] = int(round((filtered_xs[-1] + x) / 2))
-    xs = filtered_xs
-
-    min_row_h = max(5, int(height * 0.012))
-    filtered_ys = []
-    for y in ys:
-        if not filtered_ys or y - filtered_ys[-1] >= min_row_h:
-            filtered_ys.append(y)
-        else:
-            filtered_ys[-1] = int(round((filtered_ys[-1] + y) / 2))
-    ys = filtered_ys
-
-    if len(xs) < 4 or len(ys) < 3:
-        return {
-            "ok": False,
-            "reason": f"Grade insuficiente: {len(xs)} linhas verticais e {len(ys)} horizontais.",
-            "xs": xs,
-            "ys": ys,
-        }
-
-    return {"ok": True, "xs": xs, "ys": ys, "method": "projecao_de_pixels"}
-
-
-def _ocr_cell_text(img: Image.Image, box: tuple[int, int, int, int], numeric: bool = False) -> str:
-    x1, y1, x2, y2 = box
-    if x2 <= x1 or y2 <= y1:
-        return ""
-    mx = max(2, int((x2 - x1) * 0.02))
-    my = max(1, int((y2 - y1) * 0.06))
-    crop = img.crop((x1 + mx, y1 + my, x2 - mx, y2 - my))
-    scale = 6 if numeric else 4
-    crop = crop.resize((max(1, crop.width * scale), max(1, crop.height * scale)))
-
-    gray = ImageOps.autocontrast(crop.convert("L"))
-    threshold = gray.point(lambda p: 255 if p > 170 else 0)
-    variants = [crop, threshold, gray]
-    configs = []
-    if numeric:
-        configs = [
-            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.,-",
-            "--oem 3 --psm 13 -c tessedit_char_whitelist=0123456789.,-",
-            "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789.,-",
-        ]
-    else:
-        configs = ["--oem 3 --psm 7", "--oem 3 --psm 6", "--oem 3 --psm 11"]
-
-    best = ""
-    for variant in variants:
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(variant, lang="eng", config=config).strip()
-            except Exception:
-                text = ""
-            if text:
-                if numeric and extract_all_money_misto(text):
-                    return text
-                if not numeric:
-                    return text
-                if len(text) > len(best):
-                    best = text
-    return best
-
-
-def _header_matches(text: str, aliases: list[str], threshold: float = 0.72) -> bool:
-    candidate = _norm_name(text)
-    if not candidate:
-        return False
-    for alias in aliases:
-        target = _norm_name(alias)
-        if candidate == target or (len(target) >= 4 and target in candidate):
-            return True
-        if len(candidate) >= max(3, len(target) - 2) and _name_similarity(candidate, target) >= threshold:
-            return True
-    return False
-
-
-def _read_table_by_grid(img: Image.Image) -> dict:
-    """Lê a tabela célula a célula depois de detectar sua grade dinamicamente."""
-    grid = _detect_table_grid(img)
-    if not grid.get("ok"):
-        return {"ok": False, "reason": grid.get("reason", "Grade não detectada."), "grid": grid}
-
-    xs = grid["xs"]
-    ys = grid["ys"]
-    matrix = []
-    for r in range(len(ys) - 1):
-        row = []
-        for c in range(len(xs) - 1):
-            box = (xs[c], ys[r], xs[c + 1], ys[r + 1])
-            row.append({"box": box, "text": _ocr_cell_text(img, box, numeric=False)})
-        matrix.append(row)
-
-    header_index = None
-    header_map = {}
-    for r, row in enumerate(matrix):
-        local = {}
-        for c, cell in enumerate(row):
-            text = cell["text"]
-            if _header_matches(text, ["rake"], threshold=0.78):
-                local["rake"] = c
-            if _header_matches(text, ["ganhos", "ganho"], threshold=0.72):
-                local["ganhos"] = c
-            if _header_matches(text, ["super agente", "agente"], threshold=0.68):
-                local["agente"] = c
-        if "rake" in local and "ganhos" in local:
-            header_index = r
-            header_map = local
-            break
-
-    if header_index is None:
-        return {
-            "ok": False,
-            "reason": "Cabeçalho RAKE/GANHOS não identificado nas células da grade.",
-            "grid": grid,
-            "matrix": matrix,
-        }
-
-    if "agente" not in header_map:
-        header_map["agente"] = 0
-
-    data_rows = []
-    for r in range(header_index + 1, len(matrix)):
-        row = matrix[r]
-        agent_col = header_map["agente"]
-        if agent_col >= len(row):
-            continue
-        agent_text = row[agent_col]["text"].strip()
-        norm = _norm_name(agent_text)
-        if not norm or any(key in norm for key in ["total", "adiantamento"]):
-            continue
-
-        rake_cell = row[header_map["rake"]]
-        ganhos_cell = row[header_map["ganhos"]]
-        rake_text = _ocr_cell_text(img, rake_cell["box"], numeric=True)
-        ganhos_text = _ocr_cell_text(img, ganhos_cell["box"], numeric=True)
-        rake_vals = extract_all_money_misto(rake_text)
-        ganhos_vals = extract_all_money_misto(ganhos_text)
-        data_rows.append({
-            "row_index": r,
-            "agente": agent_text,
-            "rake": rake_vals[0] if rake_vals else 0.0,
-            "ganhos": ganhos_vals[0] if ganhos_vals else 0.0,
-            "rake_text": rake_text,
-            "ganhos_text": ganhos_text,
-            "rake_box": rake_cell["box"],
-            "ganhos_box": ganhos_cell["box"],
-        })
-
-    return {
-        "ok": True,
-        "grid": grid,
-        "header_index": header_index,
-        "header_map": header_map,
-        "rows": data_rows,
-    }
-
-
-def _find_agent_in_grid(table: dict, aliases: list[str]) -> tuple[dict | None, float]:
-    targets = [_norm_name(alias) for alias in aliases if _norm_name(alias)]
-    best = None
-    best_score = 0.0
-    for row in table.get("rows", []):
-        score = max((_name_similarity(row["agente"], target) for target in targets), default=0.0)
-        if score > best_score:
-            best = row
-            best_score = score
-    if best_score < 0.45:
-        return None, best_score
-    return best, best_score
-
-def _extract_agent_by_headers(img: Image.Image, aliases, display_name: str) -> dict:
-    """Lê RAKE e GANHOS da linha do agente sem usar coordenadas fixas.
-
-    A imagem inteira é analisada. Os cabeçalhos definem as posições das colunas,
-    e o nome do agente define a linha, portanto a ordem das linhas e a largura das
-    colunas podem mudar.
-    """
-    structure = _detect_table_structure(img)
-    if not structure.get("ok"):
-        return {
-            "found": False,
-            "agente": display_name,
-            "ganhos": 0.0,
-            "rake": 0.0,
-            "ocr_text": structure.get("reason", "Estrutura da tabela não identificada."),
-        }
-
-    row, score = _find_agent_row(structure, list(aliases))
-    if row is None:
-        visible_rows = "\n".join(f"- {r['text']}" for r in structure.get("data_rows", []))
-        return {
-            "found": False,
-            "agente": display_name,
-            "ganhos": 0.0,
-            "rake": 0.0,
-            "ocr_text": f"Agente não localizado. Melhor similaridade: {score:.2f}\n\nLinhas detectadas:\n{visible_rows}",
-        }
-
-    y1, y2 = _row_vertical_bounds(structure, row, img.height)
-    rake_left, rake_right = structure["bounds"]["rake"]
-    ganhos_left, ganhos_right = structure["bounds"]["ganhos"]
-
-    rake_box = (int(rake_left), y1, int(rake_right), y2)
-    ganhos_box = (int(ganhos_left), y1, int(ganhos_right), y2)
-
-    rake_txt, rake = _numeric_ocr_from_cell(img, rake_box)
-    ganhos_txt, ganhos = _numeric_ocr_from_cell(img, ganhos_box)
-
-    centers_txt = ", ".join(f"{k}={v:.1f}" for k, v in sorted(structure["centers"].items(), key=lambda item: item[1]))
+    targets = [_norm_name(a) for a in aliases]
+    if data is not None and not data.empty:
+        data = data.dropna(subset=["text"])
+        for _, row in data.iterrows():
+            token = _norm_name(row.get("text", ""))
+            if token and any(t in token or token in t for t in targets if len(t) >= 4):
+                return int(row["top"] + row["height"] / 2)
+
+    # fallback por linhas OCR; estima o centro da linha pela posição no texto
+    full = ocr_image(img, psm=6)
+    lines = [ln for ln in full.splitlines() if ln.strip()]
+    for i, line in enumerate(lines):
+        nline = _norm_name(line)
+        if any(t in nline for t in targets):
+            return int(img.height * (0.25 + 0.55 * (i / max(1, len(lines) - 1))))
+    return None
+
+
+def ocr_row_value(img: Image.Image, y_center: int, x1: float, x2: float) -> tuple[str, float]:
+    h = img.height
+    band = max(28, int(h * 0.045))
+    box = (int(img.width * x1), max(0, y_center - band), int(img.width * x2), min(h, y_center + band))
+    crop = img.crop(box).resize((max(1, int((box[2]-box[0]) * 4)), max(1, int((box[3]-box[1]) * 4))))
+    txt = "\n".join([ocr_image(crop, psm=7), ocr_image(crop, psm=6), ocr_image(crop, psm=11)])
+    vals = [v for v in extract_all_money_misto(txt) if abs(v) < 1000000]
+    return txt, (vals[0] if vals else 0.0)
+
+
+def extract_agent_from_adamantium_table(img: Image.Image, aliases, display_name: str) -> dict:
+    y = find_agent_y(img, aliases)
+    if y is None:
+        return {"found": False, "agente": display_name, "ganhos": 0.0, "rake": 0.0, "ocr_text": "Agente não localizado."}
+
+    # Layout observado: SUPER AGENTE | Rake | -25% | Ganhos | Resultado
+    rake_txt, rake = ocr_row_value(img, y, 0.30, 0.46)
+    ganhos_txt, ganhos = ocr_row_value(img, y, 0.57, 0.74)
     return {
         "found": True,
         "agente": display_name,
         "ganhos": ganhos,
         "rake": rake,
-        "ocr_text": (
-            f"Linha localizada: {row['text']}\n"
-            f"Similaridade: {score:.2f}\n"
-            f"Y da linha: {row['y']:.1f}\n"
-            f"Cabeçalhos/centros detectados: {centers_txt}\n"
-            f"Recorte RAKE: {rake_box}\n"
-            f"OCR RAKE:\n{rake_txt}\n"
-            f"RAKE FINAL: {rake}\n\n"
-            f"Recorte GANHOS: {ganhos_box}\n"
-            f"OCR GANHOS:\n{ganhos_txt}\n"
-            f"GANHOS FINAL: {ganhos}"
-        ),
+        "ocr_text": f"Y localizado: {y}\n\nOCR RAKE:\n{rake_txt}\n\nOCR GANHOS:\n{ganhos_txt}",
     }
-
-
-def extract_agent_from_adamantium_table(img: Image.Image, aliases, display_name: str) -> dict:
-    """Lê a imagem inteira, detecta a grade e identifica a linha pelo nome do agente.
-
-    Primeiro tenta a leitura estrutural da tabela por linhas/colunas detectadas.
-    Se a grade não for reconhecida, usa o OCR por cabeçalhos como fallback.
-    """
-    table = _read_table_by_grid(img)
-    if table.get("ok"):
-        row, score = _find_agent_in_grid(table, list(aliases))
-        if row is not None:
-            detected_rows = "\n".join(
-                f"- {item['agente']}: RAKE={item['rake']} | GANHOS={item['ganhos']}"
-                for item in table.get("rows", [])
-            )
-            return {
-                "found": True,
-                "agente": display_name,
-                "ganhos": float(row["ganhos"]),
-                "rake": float(row["rake"]),
-                "ocr_text": (
-                    "MÉTODO: leitura dinâmica pela grade da tabela inteira\n"
-                    f"Linhas verticais detectadas: {table['grid']['xs']}\n"
-                    f"Linhas horizontais detectadas: {table['grid']['ys']}\n"
-                    f"Colunas identificadas: {table['header_map']}\n"
-                    f"Agente reconhecido: {row['agente']}\n"
-                    f"Similaridade: {score:.2f}\n"
-                    f"Recorte RAKE: {row['rake_box']}\n"
-                    f"OCR RAKE: {row['rake_text']}\n"
-                    f"RAKE FINAL: {row['rake']}\n"
-                    f"Recorte GANHOS: {row['ganhos_box']}\n"
-                    f"OCR GANHOS: {row['ganhos_text']}\n"
-                    f"GANHOS FINAL: {row['ganhos']}\n\n"
-                    f"Linhas reconhecidas:\n{detected_rows}"
-                ),
-            }
-
-    fallback = _extract_agent_by_headers(img, aliases, display_name)
-    grid_reason = table.get("reason", "Agente não encontrado na grade.")
-    fallback["ocr_text"] = (
-        f"A leitura pela grade não foi concluída: {grid_reason}\n"
-        "Foi usado o fallback por cabeçalhos e coordenadas detectadas.\n\n"
-        + fallback.get("ocr_text", "")
-    )
-    return fallback
 
 
 def extract_suprema_total(img: Image.Image) -> dict:
@@ -1392,6 +861,9 @@ def generate_summary_report(titulo: str, periodo: str, headers, values, rebate: 
     return img
 
 
+def generate_harnefer_report(periodo: str, ganhos: float, rake: float) -> Image.Image:
+    rb = rake * (RB_HARNEFER / 100.0)
+    return generate_summary_report("HARNEFER", periodo, ["GANHOS", "RAKE", f"RB ({int(RB_HARNEFER)}%)", "TOTAL"], [ganhos, rake, rb, ganhos+rb], 0, ganhos+rb)
 
 
 def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, total_geral: float,
@@ -1446,27 +918,14 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
         y+=rh
 
     total_base = total_geral if total_base_exibido is None else total_base_exibido
-    summary = [("Subtotal" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
+    summary = [("SUBTOTAL" if adjustment_rows else "TOTAL", total_base, NAVY, WHITE)] + adjustment_rows
     for idx,(label,value,bg,label_color) in enumerate(summary):
-            draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
-            label_end=xs[-2]
-            sw,_=measure(draw,label,total_font)
-            draw.text((label_end-sw-14,y+10),label,fill=label_color,font=total_font)
-
-            val=fmt_brl(value)
-            vw,_=measure(draw,val,total_font)
-
-            # valor branco apenas na linha SUBTOTAL/TOTAL azul
-            value_color = WHITE if idx == 0 else (0,0,0)
-
-            draw.text(
-                ((xs[-2]+xs[-1])/2-vw/2, y+10),
-                val,
-                fill=value_color,
-                font=total_font
-            )
-
-            y+=TABLE_ROW_H_MIN
+        draw.rectangle((x1,y,xs[-1],y+TABLE_ROW_H_MIN),fill=bg,outline=GRID,width=2)
+        label_end=xs[-2]
+        sw,_=measure(draw,label,total_font); draw.text((label_end-sw-14,y+10),label,fill=label_color,font=total_font)
+        val=fmt_brl(value); vw,_=measure(draw,val,total_font)
+        draw.text(((xs[-2]+xs[-1])/2-vw/2,y+10),val,fill=(0,0,0),font=total_font)
+        y+=TABLE_ROW_H_MIN
 
     status_text="PREMIER TEM A PAGAR" if total_geral>0 else ("PREMIER TEM A RECEBER" if total_geral<0 else "SEM VALORES")
     status_value=f"R$ {fmt_brl(abs(total_geral))}"; by1=y+35; by2=by1+90
@@ -1480,6 +939,19 @@ def generate_client_table_image(titulo: str, periodo: str, df: pd.DataFrame, tot
 # =========================
 # PÁGINAS
 # =========================
+def page_harnefer():
+    st.subheader("Harnefer")
+    periodo=st.text_input("Período do fechamento",key="periodo_harnefer",placeholder="13/04/2026 a 19/04/2026")
+    arquivo=st.file_uploader("Envie a imagem do Harnefer",type=["png","jpg","jpeg","webp"],key="harnefer_img")
+    if not TESSERACT_OK:
+        st.error("OCR indisponível: instale `pytesseract` e `tesseract-ocr`."); return
+    if arquivo and st.button("Ler imagem e gerar fechamento",type="primary",key="btn_harnefer"):
+        img=Image.open(arquivo)
+        if not detect_harnefer_image(img): st.warning("Não identifiquei a imagem do Harnefer com segurança."); return
+        dados=extract_harnefer_values(img)
+        report=generate_harnefer_report(periodo.strip() or "-",dados["ganhos"],dados["rake"])
+        st.image(report,caption="Relatório final",use_container_width=True)
+        st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="harnefer_fechamento.png",mime="image/png")
 
 
 def page_alex():
@@ -1493,15 +965,12 @@ def page_alex():
     if st.button("Gerar fechamento Alex",type="primary",key="btn_alex"):
         if not rows: st.warning("Envie o PDF do Alex."); return
         df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
-        subtotal=float(df["TOTAL"].sum())
-        rebate=subtotal*(REBATE_ALEX_POSITIVO/100.0)
-        total=subtotal+rebate
-        adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
-        report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total,adjustments,subtotal)
+        total=float(df["TOTAL"].sum())
+        report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total)
         st.image(report,caption="Pronto para print",use_container_width=True)
         st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="alex_fechamento.png",mime="image/png")
 
-       
+
 def page_oscar():
     st.subheader("Oscar")
     periodo=st.text_input("Período do fechamento",key="periodo_oscar",placeholder="06/04/2026 a 12/04/2026")
@@ -1510,7 +979,7 @@ def page_oscar():
     if pdf is not None:
         for _,r in process_pdf_by_client(pdf,"Oscar").iterrows():
             row=base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"],rebate=r["rebate"])
-            row["TOTAL"]=row["RB"]+row["REBATE"]
+            row["TOTAL"]=row["GANHOS"]+row["RB"]+row["REBATE"]
             rows.append(row)
     if st.button("Gerar fechamento Oscar",type="primary",key="btn_oscar"):
         if not rows: st.warning("Envie o PDF do Oscar."); return
@@ -1529,15 +998,7 @@ def page_demetra():
     rows=[]
     if pdf is not None:
         for _,r in process_pdf_by_client(pdf,"Demetra").iterrows():
-            row=base_row(
-                r["agente"],
-                r["ganhos"],
-                r["rake"],
-                r["rb_percentual"],
-                rebate=r["rebate"],
-            )
-            row["TOTAL"]=row["GANHOS"]+row["RB"]+row["REBATE"]
-            rows.append(row)
+            rows.append(base_row(r["agente"],r["ganhos"],r["rake"],r["rb_percentual"]))
     if imagem is not None:
         img=Image.open(imagem)
         dados=extract_agent_from_adamantium_table(img,["Killuminatti","KILLUMINATTI"],"Killuminatti")
@@ -1548,11 +1009,11 @@ def page_demetra():
             rows.append(base_row("Killuminatti",dados["ganhos"],dados["rake"],70.0))
     if st.button("Gerar fechamento Demetra",type="primary",key="btn_demetra"):
         if not rows: st.warning("Envie o PDF e/ou a imagem Killuminatti."); return
-        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","REBATE","TOTAL"]]
+        df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
         subtotal=float(df["TOTAL"].sum())
         rebate=subtotal*(REBATE_DEMETRA/100.0) if subtotal>0 else 0.0
         total=subtotal+rebate
-        adjustments=[("-5% total" if subtotal>0 else "Rebate",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
+        adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
         report=generate_client_table_image("DEMETRA",periodo.strip() or "-",df,total,adjustments,subtotal)
         st.image(report,caption="Pronto para print",use_container_width=True)
         st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="demetra_fechamento.png",mime="image/png")
@@ -1592,12 +1053,9 @@ def page_strong():
 
 
 st.title("Fechamentos Premier")
-cliente = st.selectbox("Escolha o cliente", ["Demetra", "Oscar", "Alex", "Strong"])
-if cliente == "Demetra":
-    page_demetra()
-elif cliente == "Oscar":
-    page_oscar()
-elif cliente == "Alex":
-    page_alex()
-else:
-    page_strong()
+cliente=st.selectbox("Escolha o cliente",["Harnefer","Demetra","Oscar","Alex","Strong"])
+if cliente=="Harnefer": page_harnefer()
+elif cliente=="Demetra": page_demetra()
+elif cliente=="Oscar": page_oscar()
+elif cliente=="Alex": page_alex()
+else: page_strong()
