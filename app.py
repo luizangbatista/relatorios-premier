@@ -645,12 +645,29 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
 
     Para Oscar, também captura a terceira coluna monetária como REBATE.
     O RAKEBACK presente no PDF nunca é usado como percentual.
+
+    A ordem de GANHOS e RAKE não é fixa: ela é identificada pelo cabeçalho
+    do próprio PDF. Isso mantém compatibilidade com relatórios antigos
+    (GANHOS antes de RAKE) e com o formato novo (RAKE antes de GANHOS).
     """
     rows = []
+    money_order = ["ganhos", "rake"]  # formato antigo, usado como fallback
     for line in extract_pdf_lines(uploaded_file):
+        header = line.casefold()
+        if "ganhos" in header and "rake" in header:
+            money_order = (
+                ["rake", "ganhos"]
+                if header.find("rake") < header.find("ganhos")
+                else ["ganhos", "rake"]
+            )
+            continue
+
         if "R$" not in line:
             continue
-        id_match = re.search(r"\b(0|\d{6,9})\b", line)
+        # O ID sempre aparece antes dos valores monetários. Limitar a busca a
+        # esse trecho evita interpretar o zero de "R$ 0,00" como o ID Oscar 0.
+        first_money_pos = line.find("R$")
+        id_match = re.search(r"\b(0|\d{6,9})\b", line[:first_money_pos])
         if not id_match:
             continue
         id_agente = normalize_id(id_match.group(1))
@@ -662,8 +679,14 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
         if len(money_matches) < 2:
             continue
 
-        ganhos = parse_money(money_matches[0])
-        rake = parse_money(money_matches[1])
+        first_value = parse_money(money_matches[0])
+        second_value = parse_money(money_matches[1])
+        values_by_column = {
+            money_order[0]: first_value,
+            money_order[1]: second_value,
+        }
+        ganhos = values_by_column["ganhos"]
+        rake = values_by_column["rake"]
         # REBATE do PDF: para Oscar o valor é usado diretamente;
         # para Demetra o valor serve APENAS como indicador de que há rebate.
         rebate_pdf = (
@@ -1591,8 +1614,11 @@ def page_alex():
     if st.button("Gerar fechamento Alex",type="primary",key="btn_alex"):
         if not rows: st.warning("Envie o PDF do Alex."); return
         df=pd.DataFrame(rows)[["AGENTE","GANHOS","RAKE","RB(%)","RB","TOTAL"]]
-        total=float(df["TOTAL"].sum())
-        report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total)
+        subtotal=float(df["TOTAL"].sum())
+        rebate=subtotal*(REBATE_ALEX_POSITIVO/100.0)
+        total=subtotal+rebate
+        adjustments=[("-5% total",rebate,LIGHT_GRAY,(0,0,0)),("TOTAL",total,YELLOW,(0,0,0))]
+        report=generate_client_table_image("ALEX",periodo.strip() or "-",df,total,adjustments,subtotal)
         st.image(report,caption="Pronto para print",use_container_width=True)
         st.download_button("Baixar relatório em PNG",data=to_png_bytes(report),file_name="alex_fechamento.png",mime="image/png")
 
