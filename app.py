@@ -633,11 +633,162 @@ def extract_demetra_image_values(img: Image.Image) -> dict:
 # =========================
 def extract_pdf_lines(uploaded_file):
     lines = []
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
     with pdfplumber.open(uploaded_file) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
             lines.extend([ln.strip() for ln in text.splitlines() if ln.strip()])
     return lines
+
+
+def _words_text(words) -> str:
+    """Remonta o texto de uma célula preservando a ordem visual."""
+    ordered = sorted(words, key=lambda w: (round(float(w["top"]) / 3), float(w["x0"])))
+    return " ".join(str(w["text"]).strip() for w in ordered if str(w["text"]).strip())
+
+
+def _column_bounds(centers: dict, column: str, page_width: float) -> tuple[float, float]:
+    """Calcula os limites de uma coluna a partir dos centros dos cabeçalhos."""
+    ordered = sorted((float(x), name) for name, x in centers.items())
+    position = next(i for i, (_, name) in enumerate(ordered) if name == column)
+    center = ordered[position][0]
+    left = 0.0 if position == 0 else (ordered[position - 1][0] + center) / 2
+    right = page_width if position == len(ordered) - 1 else (center + ordered[position + 1][0]) / 2
+    return left, right
+
+
+def extract_pdf_player_records(uploaded_file):
+    """Extrai a tabela detalhada usando as coordenadas reais do PDF.
+
+    Os relatórios mais novos podem distribuir um único registro em várias
+    linhas de texto. A leitura por coordenadas mantém cada valor na coluna
+    correta e o associa ao ID pela faixa vertical da linha do jogador.
+    """
+    records = []
+    if hasattr(uploaded_file, "seek"):
+        uploaded_file.seek(0)
+
+    with pdfplumber.open(uploaded_file) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(use_text_flow=False, keep_blank_chars=False) or []
+            if not words:
+                continue
+
+            # Procura o cabeçalho da tabela detalhada. O cabeçalho do resumo
+            # não possui ID e, por isso, não será confundido com este.
+            header = None
+            for id_word in words:
+                if str(id_word["text"]).strip().casefold() != "id":
+                    continue
+                top = float(id_word["top"])
+                same_line = [w for w in words if abs(float(w["top"]) - top) <= 3]
+                by_text = {str(w["text"]).strip().casefold(): w for w in same_line}
+                required = ["rake", "ganhos", "rebate"]
+                if all(name in by_text for name in required):
+                    header = {
+                        "top": top,
+                        "id": id_word,
+                        "rake": by_text["rake"],
+                        "ganhos": by_text["ganhos"],
+                        "rebate": by_text["rebate"],
+                        "nick": by_text.get("nick") or by_text.get("agente"),
+                        "clube": by_text.get("clube"),
+                    }
+                    break
+
+            if header is None:
+                continue
+
+            value_headers = {
+                name: (float(header[name]["x0"]) + float(header[name]["x1"])) / 2
+                for name in ["id", "rake", "ganhos", "rebate"]
+            }
+            bounds = {
+                name: _column_bounds(value_headers, name, float(page.width))
+                for name in value_headers
+            }
+
+            id_left, id_right = bounds["id"]
+            id_words = []
+            for word in words:
+                text = str(word["text"]).strip()
+                center = (float(word["x0"]) + float(word["x1"])) / 2
+                if (
+                    float(word["top"]) > float(header["top"]) + 8
+                    and id_left <= center < id_right
+                    and re.fullmatch(r"0|\d{6,9}", text)
+                ):
+                    id_words.append(word)
+
+            id_words.sort(key=lambda w: float(w["top"]))
+            if not id_words:
+                continue
+
+            tops = [float(w["top"]) for w in id_words]
+            typical_gap = (
+                sum(b - a for a, b in zip(tops, tops[1:])) / (len(tops) - 1)
+                if len(tops) > 1
+                else 42.0
+            )
+
+            for index, id_word in enumerate(id_words):
+                row_top = (
+                    (tops[index - 1] + tops[index]) / 2
+                    if index > 0
+                    else float(header["top"]) + 12
+                )
+                row_bottom = (
+                    (tops[index] + tops[index + 1]) / 2
+                    if index + 1 < len(tops)
+                    else tops[index] + max(typical_gap / 2, 20.0)
+                )
+
+                def cell_words(column):
+                    left, right = bounds[column]
+                    return [
+                        w for w in words
+                        if row_top <= float(w["top"]) < row_bottom
+                        and left <= (float(w["x0"]) + float(w["x1"])) / 2 < right
+                    ]
+
+                rake = first_money(_words_text(cell_words("rake")))
+                ganhos = first_money(_words_text(cell_words("ganhos")))
+                rebate = first_money(_words_text(cell_words("rebate")))
+
+                # Mantém o mesmo padrão de identificação visual já usado nos
+                # relatórios: clube seguido do nick/agente.
+                agent_parts = []
+                if header.get("clube") is not None and header.get("nick") is not None:
+                    club_center = (float(header["clube"]["x0"]) + float(header["clube"]["x1"])) / 2
+                    nick_center = (float(header["nick"]["x0"]) + float(header["nick"]["x1"])) / 2
+                    name_split = (club_center + nick_center) / 2
+                    name_bounds = {
+                        "clube": (0.0, name_split),
+                        # Usa o início visual do cabeçalho ID, não o ponto
+                        # médio entre Nick e ID. Isso preserva sufixos longos
+                        # como "diamond" sem capturar o número da conta.
+                        "nick": (name_split, float(header["id"]["x0"]) - 2),
+                    }
+                    for column in ["clube", "nick"]:
+                        left, right = name_bounds[column]
+                        text = _words_text([
+                            w for w in words
+                            if row_top <= float(w["top"]) < row_bottom
+                            and left <= (float(w["x0"]) + float(w["x1"])) / 2 < right
+                        ])
+                        if text:
+                            agent_parts.append(text)
+
+                records.append({
+                    "agente": " ".join(agent_parts) or f"ID {id_word['text']}",
+                    "id_agente": normalize_id(id_word["text"]),
+                    "ganhos": ganhos,
+                    "rake": rake,
+                    "rebate": rebate,
+                })
+
+    return records
 
 
 def process_pdf_by_client(uploaded_file, cliente_alvo: str):
@@ -651,6 +802,27 @@ def process_pdf_by_client(uploaded_file, cliente_alvo: str):
     (GANHOS antes de RAKE) e com o formato novo (RAKE antes de GANHOS).
     """
     rows = []
+
+    # Caminho principal: leitura estrutural por coordenadas. IDs ainda não
+    # cadastrados continuam ignorados e podem ser incluídos no mapa depois.
+    records = extract_pdf_player_records(uploaded_file)
+    if records:
+        for record in records:
+            id_agente = record["id_agente"]
+            info = MAPA_IDS_PDF.get(id_agente)
+            if not info or info["cliente"] != cliente_alvo:
+                continue
+
+            rebate_pdf = float(record["rebate"])
+            rows.append({
+                **record,
+                "tem_rebate_pdf": abs(rebate_pdf) > 0.0001,
+                "rb_percentual": float(info["rb"]),
+            })
+        return pd.DataFrame(rows)
+
+    # Compatibilidade com PDFs antigos cuja tabela não exponha coordenadas de
+    # texto utilizáveis.
     money_order = ["ganhos", "rake"]  # formato antigo, usado como fallback
     for line in extract_pdf_lines(uploaded_file):
         header = line.casefold()
